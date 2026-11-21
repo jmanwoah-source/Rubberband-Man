@@ -23,3 +23,7 @@ intel_bus/*.db-shm
 scratch/
 .DS_Store
 Thumbs.db
+
+# Node / React PWA build artifacts
+web/node_modules/
+web/dist/

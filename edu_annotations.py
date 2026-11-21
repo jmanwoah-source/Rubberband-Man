@@ -9,12 +9,18 @@ from __future__ import annotations
 
 import hashlib
 import html as _html
+import re
 from typing import Any, Dict, List, Optional, Tuple
-import streamlit as st
+try:
+    import streamlit as st
+except ImportError:
+    st = None  # type: ignore[assignment]
 
 
 def is_learn_mode() -> bool:
     """Return True when progressive educational drawers are enabled."""
+    if st is None:
+        return True
     if "learn_mode" not in st.session_state:
         qp_learn = str(st.query_params.get("learn", "") or "").strip().lower()
         if qp_learn in ("0", "false", "off", "no"):
@@ -22,6 +28,12 @@ def is_learn_mode() -> bool:
         else:
             st.session_state["learn_mode"] = True
     return bool(st.session_state.get("learn_mode", True))
+
+
+def _strip_markup_for_json(text: str) -> str:
+    """Convert safe internal <b>/<i> tags and HTML entities into clean UTF-8 strings for JSON APIs."""
+    no_fmt = re.sub(r"</?(?:b|i)\b[^>]*>", "", str(text or ""))
+    return _html.unescape(no_fmt)
 
 
 def _esc(val: Any) -> str:
@@ -382,6 +394,26 @@ def _build_topic(topic_key: str, ctx: Dict[str, Any]) -> Optional[Tuple[str, str
     return None
 
 
+def get_edu_topic(
+    topic_key: str,
+    live_ctx: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, str]]:
+    """Return structured Learn Mode L1/L2/L3 payload as clean UTF-8 text for REST APIs."""
+    built = _build_topic(topic_key, live_ctx or {})
+    if not built:
+        return None
+    title, live, beg, inter, pro, thumb = built
+    return {
+        "key": str(topic_key),
+        "title": _strip_markup_for_json(title),
+        "live": _strip_markup_for_json(live),
+        "l1": _strip_markup_for_json(beg),
+        "l2": _strip_markup_for_json(inter),
+        "l3": _strip_markup_for_json(pro),
+        "rule_of_thumb": _strip_markup_for_json(thumb),
+    }
+
+
 def render_edu_drawer(
     topic_key: str,
     live_ctx: Optional[Dict[str, Any]] = None,
@@ -392,7 +424,7 @@ def render_edu_drawer(
     Renders a sleek, low-profile obsidian pill (`◈` glyph + clickable L1/L2/L3 tabs inside)
     when Learn Mode is ON. All dynamic strings are escaped via html.escape. Zero JS or reruns.
     """
-    if not is_learn_mode():
+    if st is None or not is_learn_mode():
         return
 
     built = _build_topic(topic_key, live_ctx or {})
