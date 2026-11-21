@@ -67,8 +67,13 @@ def get_current_density_mode() -> str:
 
 def _sync_density_widget_keys(mode: str) -> None:
     lbl = "📱 Mobile Companion" if mode == "mobile" else "🖥️ Terminal Pro"
-    st.session_state["sb_segmented_density_choice"] = lbl
-    st.session_state["sb_radio_density_choice"] = lbl
+    for wkey in ("sb_segmented_density_choice", "sb_radio_density_choice"):
+        if st.session_state.get(wkey) != lbl:
+            try:
+                st.session_state[wkey] = lbl
+            except Exception:
+                # Widget already instantiated earlier in this run; ui_density_mode + query_params will sync on rerun
+                pass
 
 
 def set_density_mode(mode: str) -> None:
