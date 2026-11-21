@@ -1,0 +1,72 @@
+[
+  {
+    "symbol": "ONTO",
+    "track": "TRACK_B_BOTTLENECK",
+    "wiki_score": 88,
+    "primary_benchmark": "SMH",
+    "parent_whale": "TSM",
+    "dilution_risk": false,
+    "thesis_hook": "[Karpathy Wiki \u00b7 Physics Moat] Sole-source sub-nanometer acoustic metrology for CoWoS-L 3D HBM packaging; TSMC yield bottleneck anchor.",
+    "last_updated": "2026-10-21T00:09:32.014606+00:00"
+  },
+  {
+    "symbol": "CRDO",
+    "track": "TRACK_B_BOTTLENECK",
+    "wiki_score": 85,
+    "primary_benchmark": "SMH",
+    "parent_whale": "MSFT",
+    "dilution_risk": false,
+    "thesis_hook": "[Karpathy Wiki \u00b7 Interconnect Breakthrough] Proprietary DSP SerDes powering Active Electrical Cables (AEC); 800G/1.6T AI cluster copper monopoly.",
+    "last_updated": "2026-10-21T00:09:32.014606+00:00"
+  },
+  {
+    "symbol": "VRT",
+    "track": "TRACK_A_FORTRESS",
+    "wiki_score": 92,
+    "primary_benchmark": "SMH",
+    "parent_whale": "NVDA",
+    "dilution_risk": false,
+    "thesis_hook": "[Karpathy Wiki \u00b7 Thermal Moat] Direct-to-chip two-phase liquid cooling & high-voltage busway architecture co-engineered for Blackwell/Rubin racks.",
+    "last_updated": "2026-10-21T00:09:32.014606+00:00"
+  },
+  {
+    "symbol": "MPWR",
+    "track": "TRACK_A_FORTRESS",
+    "wiki_score": 89,
+    "primary_benchmark": "SMH",
+    "parent_whale": "NVDA",
+    "dilution_risk": false,
+    "thesis_hook": "[Karpathy Wiki \u00b7 Silicon Process Moat] Proprietary BCD process technology enabling ultra-dense vertical power delivery (VPD) beneath AI accelerators.",
+    "last_updated": "2026-10-21T00:09:32.014606+00:00"
+  },
+  {
+    "symbol": "OKLO",
+    "track": "TRACK_B_BOTTLENECK",
+    "wiki_score": 82,
+    "primary_benchmark": "URA",
+    "parent_whale": "MSFT",
+    "dilution_risk": false,
+    "thesis_hook": "[Karpathy Wiki \u00b7 Fission Breakthrough] Aurora liquid-metal fast neutron reactor utilizing recycled HALEU fuel; multi-GW hyperscaler PPA pipeline.",
+    "last_updated": "2026-10-21T00:09:32.014606+00:00"
+  },
+  {
+    "symbol": "SYM",
+    "track": "TRACK_B_BOTTLENECK",
+    "wiki_score": 81,
+    "primary_benchmark": "BOTZ",
+    "parent_whale": "WMT",
+    "dilution_risk": false,
+    "thesis_hook": "[Karpathy Wiki \u00b7 Autonomous Swarm Moat] High-speed autonomous mobile bot orchestration with $22B+ contracted backlog across US supply chain hubs.",
+    "last_updated": "2026-10-21T00:09:32.014606+00:00"
+  },
+  {
+    "symbol": "PLUG",
+    "track": "TRACK_C_MIRAGE",
+    "wiki_score": 22,
+    "primary_benchmark": "URA",
+    "parent_whale": "AMZN",
+    "dilution_risk": true,
+    "thesis_hook": "[Karpathy Wiki \u00b7 Mirage Flag] Negative gross margin hydrogen electrolyzer model trapped under active $1B ATM equity dilution wall & severe cash burn.",
+    "last_updated": "2026-10-21T00:09:32.014606+00:00"
+  }
+]
