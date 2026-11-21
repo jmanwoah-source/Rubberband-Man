@@ -1752,19 +1752,27 @@ def render_schwab_practice_diary_page():
 
     # Quick Thematic ETF Jump Bar (REMX, SRVR, ROBO, JEDI, SMH, URA, QTUM, IGV)
     st.caption("Thematic ETF Baskets (1-Click Jump):")
-    for row_start in range(0, len(_THEMATIC_ETF_CHIPS), 6):
-        row_slice = _THEMATIC_ETF_CHIPS[row_start:row_start + 6]
-        etf_cols = st.columns(6, gap="small")
-        for e_idx, etf_sym in enumerate(row_slice):
-            with etf_cols[e_idx]:
-                if st.button(
-                    etf_sym,
-                    key=f"btn_sim_etf_{etf_sym}",
-                    width="stretch",
-                    type="primary" if etf_sym == active_sym else "secondary",
-                ):
-                    set_active_sim_symbol(etf_sym)
-                    st.rerun()
+
+    def _on_sim_etf_pick() -> None:
+        picked_etf = st.session_state.get("sim_etf_pills")
+        cur_sym = st.session_state.get("schwab_sim_active_symbol") or active_sym
+        if picked_etf and picked_etf != cur_sym:
+            set_active_sim_symbol(picked_etf)
+            st.session_state["_sim_etf_synced_sym"] = picked_etf
+
+    _sim_etf_def = active_sym if active_sym in _THEMATIC_ETF_CHIPS else None
+    if st.session_state.get("_sim_etf_synced_sym") != active_sym:
+        st.session_state["sim_etf_pills"] = _sim_etf_def
+        st.session_state["_sim_etf_synced_sym"] = active_sym
+
+    st.pills(
+        "Thematic ETFs",
+        options=_THEMATIC_ETF_CHIPS,
+        selection_mode="single",
+        key="sim_etf_pills",
+        on_change=_on_sim_etf_pick,
+        label_visibility="collapsed",
+    )
 
     # Fetch Comprehensive Ticker Intelligence
     with st.spinner(f"Retrieving market intelligence & Rubberband edge for {active_sym}..."):
@@ -3123,6 +3131,20 @@ def render_daily_recommendation_ledger_page():
         </div>
     </div>
     """)
+
+    if _edu is not None:
+        _edu.render_edu_drawer(
+            "journal_audit",
+            live_ctx={
+                "snapshot_date": sel_date,
+                "win_rate_pct": win_rate,
+                "avg_dir_pct": avg_delta,
+                "avg_opt_roi_pct": avg_opt_roi,
+                "count": len(audited_recs),
+            },
+            compact=True,
+            align="right",
+        )
 
     st.markdown("### <i class='fa-solid fa-trophy' style='color:#FF6B00;'></i> Top 5 Vetted Candidates by Sector", unsafe_allow_html=True)
 

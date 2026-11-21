@@ -7,6 +7,7 @@ desk intuition without cluttering the terminal or triggering Streamlit reruns.
 """
 from __future__ import annotations
 
+import hashlib
 import html as _html
 from typing import Any, Dict, List, Optional, Tuple
 import streamlit as st
@@ -255,13 +256,141 @@ def _build_topic(topic_key: str, ctx: Dict[str, Any]) -> Optional[Tuple[str, str
         thumb = "Know both exits before entering: take profits into your 1–5D target zone and cut fast if the Hard Stock Invalidation level breaks."
         return ("Schwab Practice Ticket & Execution Mechanics", live, beg, inter, pro, thumb)
 
+    if topic_key == "scanner_matrix":
+        sec = str(ctx.get("sector", "Semiconductors"))
+        top_sym = str(ctx.get("top_symbol", "NVDA"))
+        ev_pct = _num(ctx, "net_ev_pct", 4.2)
+        win_pct = _num(ctx, "win_rate_pct", 60.0)
+        n_ana = int(round(_num(ctx, "sample_n", 40)))
+        vrp = _num(ctx, "vrp_pts", 2.0)
+        pref_sp = bool(ctx.get("prefer_spread", False))
+        live = f"{_esc(sec)} · #{_esc(top_sym)} · 5D EV {ev_pct:+.1f}% · Hit {win_pct:.0f}% (n={n_ana}) · VRP {vrp:+.1f}v"
+        beg = (
+            "Each row ranks a stock in this sector from <b>#1 down</b>. Higher <b>Conviction (-200..+200)</b> + a positive <b>5D EV%</b> and "
+            "<b>Hit Rate %</b> means history and today's options market agree on a clean 1–5 day bounce (CALL) or fade (PUT)."
+        )
+        inter = (
+            f"<b>{_esc(top_sym)}</b> posts a <b>{win_pct:.0f}% 5Y win rate (n={n_ana} similar stretches)</b> and <b>{ev_pct:+.1f}% net EV</b>. "
+            f"<b>VRP ({vrp:+.1f}v)</b> shows whether options cost more than recent stock movement — suggesting <b>{'Vertical Spread' if pref_sp else 'Naked Single-Leg'}</b>."
+        )
+        pro = (
+            "Each row screens orthogonalized -200..+200 scores against OPRA bid-ask spread friction, 5Y CRR repricing over empirical q10..q90 closes, and binary earnings gates. "
+            "VRP &ge; +6.5v triggers spread structure substitution to immunize long-gamma entries against post-event Vega compression."
+        )
+        thumb = "Skip weak scores below &plusmn;35 or crowded negative-EV rows; concentrate on top-3 ranked names in a constructive sector."
+        return ("Reading the Scanner Rows & Net EV", live, beg, inter, pro, thumb)
+
+    if topic_key == "trade_ticket":
+        sym = str(ctx.get("symbol", "NVDA"))
+        delta_v = _num(ctx, "delta", 0.52)
+        mid_v = _num(ctx, "mid_price", 3.50)
+        tgt_p = _num(ctx, "target_price", 105.0)
+        stp_p = _num(ctx, "stop_price", 96.0)
+        kelly = _num(ctx, "quarter_kelly_pct", 2.5)
+        spr = _num(ctx, "spread_pct", 3.5)
+        live = f"{_esc(sym)} · Δ {delta_v:+.2f} · Mid ${mid_v:.2f} · Target ${tgt_p:.2f} · Stop ${stp_p:.2f} · ¼-Kelly {kelly:.1f}%"
+        beg = (
+            "Your <b>Trade Ticket</b> gives all four numbers before you risk a dollar: what contract to buy (<b>Strike &amp; DTE</b>), "
+            "what price to bid (<b>Mid Limit</b>), where to take profit (<b>+1&sigma; Target</b>), and where you admit you are wrong (<b>Hard Stop</b>)."
+        )
+        inter = (
+            f"On <b>{_esc(sym)}</b>, <b>Delta {delta_v:+.2f}</b> gives stock-like speed while paying <b>{spr:.1f}% bid-ask spread</b>. "
+            f"Exit into <b>${tgt_p:.2f}</b> on the rubberband snapback, or cut immediately if shares close below <b>${stp_p:.2f}</b>; <b>¼-Kelly ({kelly:.1f}%)</b> caps account size."
+        )
+        pro = (
+            "Mid-limit execution targets inside-NBBO fills so entry slippage stays below 0.5x spread friction. "
+            "Hard Stock Invalidation marks 2&times; ATR/VWMA structural breakdown where the mean-reversion O-U hypothesis flips to momentum trend risk."
+        )
+        thumb = "Never move your Hard Invalidation stop lower mid-trade; respect ¼-Kelly sizing so a single stop-out stays routine."
+        return ("Trade Ticket: Mid Limit, +1σ Target & Hard Stop", live, beg, inter, pro, thumb)
+
+    if topic_key == "trade_anatomy":
+        sym = str(ctx.get("symbol", "NVDA"))
+        spot = _num(ctx, "spot", 100.0)
+        vwma = _num(ctx, "vwma20", spot)
+        strike = _num(ctx, "strike", spot)
+        be_p = _num(ctx, "breakeven", spot)
+        tgt = _num(ctx, "target_price", spot * 1.05)
+        stp = _num(ctx, "stop_price", spot * 0.95)
+        cw = _num(ctx, "call_wall", 0.0)
+        pw = _num(ctx, "put_wall", 0.0)
+        gflip = _num(ctx, "gamma_flip", 0.0)
+        cw_txt = f" · Call Wall ${cw:.2f}" if cw > 0 else ""
+        pw_txt = f" · Put Wall ${pw:.2f}" if pw > 0 else ""
+        gf_txt = f" · γ-Flip ${gflip:.2f}" if gflip > 0 else ""
+        live = f"{_esc(sym)} · Stop ${stp:.2f} · Spot ${spot:.2f} · BE ${be_p:.2f} · Target ${tgt:.2f}{cw_txt}{gf_txt}"
+        beg = (
+            "This horizontal map puts <b>every key stock price on one ruler</b>: the <b>blue shaded cloud</b> shows where 5 years of history says the stock usually lands in 5 days, "
+            "while markers show your <b>Hard Stop</b>, <b>Today's Price</b>, <b>Option Strike</b>, <b>Breakeven</b>, and <b>Profit Target</b>."
+        )
+        inter = (
+            f"If your <b>Target (${tgt:.2f})</b> and <b>Breakeven (${be_p:.2f})</b> sit comfortably inside the shaded <b>P25–P75 historical core zone</b>, "
+            f"history supports the move — if <b>Strike (${strike:.2f})</b> sits beyond <b>P90</b>{cw_txt or pw_txt}, you need a rare tail breakout to get paid."
+        )
+        pro = (
+            "Overlaying empirical 5D quantile corridors (P10–P90 / P25–P75) onto OPRA dealer Put/Call OI walls and Net Gamma Flip exposes structural pin risk: "
+            "high Call Wall OI above spot acts as dealer-hedged resistance capping upside MFE into expiration."
+        )
+        thumb = "Best setups have VWMA-20 and your Target tucked inside the P25–P75 corridor without slamming straight into an opposite dealer wall."
+        return ("Reading the Trade Anatomy & Probability Corridor", live, beg, inter, pro, thumb)
+
+    if topic_key == "journal_audit":
+        snap_date = str(ctx.get("snapshot_date", "Latest"))
+        win_rt = _num(ctx, "win_rate_pct", 60.0)
+        avg_ret = _num(ctx, "avg_dir_pct", 1.2)
+        avg_roi = _num(ctx, "avg_opt_roi_pct", 8.5)
+        n_recs = int(round(_num(ctx, "count", 20)))
+        live = f"{_esc(snap_date)} ({n_recs} picks) · Dir Win {win_rt:.0f}% · Avg 5D {avg_ret:+.2f}% · Est Opt ROI {avg_roi:+.1f}%"
+        beg = (
+            "Every trading morning the scanner locks its Top-5 picks in a permanent notebook so nobody can cherry-pick winners later. "
+            "<b>T+5d Dir</b> shows where the stock closed 5 trading days later, and <b>MFE</b> shows the biggest favorable move along the way."
+        )
+        inter = (
+            f"Across <b>{n_recs} audited signals</b> on {_esc(snap_date)}, directional win rate is <b>{win_rt:.0f}%</b> with <b>{avg_ret:+.2f}%</b> average move and <b>{avg_roi:+.1f}% estimated option ROI</b>. "
+            "Compare <b>MFE vs Close</b> to learn whether taking partials on Day 2–3 beats holding to Day 5."
+        )
+        pro = (
+            "Forward T+1..T+5 path auditing prevents look-ahead leakage and quantifies MFE-to-Close decay across Volatility Regimes. "
+            "Systematic gaps where MFE &gt; Target while T+5d Close fades confirm mean-reversion overshoot exhaustion and calibrate profit-taking triggers."
+        )
+        thumb = "Judge any signal system by audited out-of-sample T+1..T+5 follow-through and target/stop hit ratio, never by cherry-picked single trades."
+        return ("Auditing Top-5 Recommendations (T+5d Dir, MFE & Opt ROI)", live, beg, inter, pro, thumb)
+
+    if topic_key == "mobile_hero":
+        sym = str(ctx.get("symbol", "NVDA"))
+        z5 = _num(ctx, "z_score_5d", 0.0)
+        hl = _num(ctx, "ou_half_life", 4.5)
+        s200 = int(round(_num(ctx, "conviction_score_200", 0)))
+        cost = _num(ctx, "contract_cost", 350.0)
+        be_p = _num(ctx, "breakeven", 100.0)
+        live = f"{_esc(sym)} · {s200:+d} · Z {z5:+.2f}σ · τ½ {hl:.1f}d · BE ${be_p:.2f} · Risk ${cost:.0f}"
+        beg = (
+            "This Hero Card summarizes one high-conviction option setup in plain numbers: <b>Conviction</b> gives direction &amp; strength, "
+            "<b>Risk</b> is the max dollars one contract can lose, and <b>BE</b> is the stock price needed at expiration to break even."
+        )
+        inter = (
+            f"<b>{_esc(sym)}</b> shows <b>Dual Z {z5:+.2f}&sigma;</b> with a <b>{hl:.1f}-day Half-Life</b>. "
+            f"Check that your <b>Max Risk (${cost:.0f}/ct)</b> fits a tiny slice of your account before tapping Simulate."
+        )
+        pro = (
+            "Hero contract selection picks the liquid 30/45 DTE High-Delta (0.45–0.65Δ) cycle filtered by 5D binary shield clearance, "
+            "balancing gamma responsiveness per dollar of Theta against empirical 5Y Bayesian hit probability."
+        )
+        thumb = "Always confirm 5D binary rings, Dual Z, and Max Risk $/ct on the card before staging a practice order."
+        return ("Quick Guide: Hero Contract & 1-Tap Risk Check", live, beg, inter, pro, thumb)
+
     return None
 
 
-def render_edu_drawer(topic_key: str, live_ctx: Optional[Dict[str, Any]] = None, compact: bool = False) -> None:
+def render_edu_drawer(
+    topic_key: str,
+    live_ctx: Optional[Dict[str, Any]] = None,
+    compact: bool = False,
+    align: str = "left",
+) -> None:
     """
-    Renders a sleek, closed-by-default Obsidian <details> educational drawer if Learn Mode is ON.
-    All dynamic strings are escaped via html.escape to prevent HTML injection.
+    Renders a sleek, low-profile obsidian pill (`◈` glyph + clickable L1/L2/L3 tabs inside)
+    when Learn Mode is ON. All dynamic strings are escaped via html.escape. Zero JS or reruns.
     """
     if not is_learn_mode():
         return
@@ -271,33 +400,46 @@ def render_edu_drawer(topic_key: str, live_ctx: Optional[Dict[str, Any]] = None,
         return
     title, live, beg, inter, pro, thumb = built
 
-    pad_cls = " rm-edu-compact" if compact else ""
+    uid = hashlib.sha1(f"{topic_key}|{live}|{align}".encode("utf-8")).hexdigest()[:10]
+    grp_name = f"rm-edu-{uid}"
+    cls_list = ["rm-edu-drawer", "rm-edu-chip"]
+    if compact:
+        cls_list.append("rm-edu-compact")
+    if align == "right":
+        cls_list.append("rm-edu-right")
+    cls_str = " ".join(cls_list)
+
+    live_span = "" if compact else f'<span class="rm-edu-live">{live}</span>'
+
     html_block = "".join(line.strip() for line in f"""
-    <details class="rm-edu-drawer{pad_cls}">
-      <summary>
-        <span class="rm-edu-summary-left">
-          <span class="rm-edu-pill">🎓 LEARN</span>
-          <span class="rm-edu-title">{_esc(title)}</span>
-        </span>
-        <span class="rm-edu-live">{live}</span>
-      </summary>
-      <div class="rm-edu-body">
-        <div class="rm-edu-grid">
-          <div class="rm-edu-tier">
-            <div class="rm-edu-tier-tag is-beg">Level 1 · Plain English</div>
-            <div class="rm-edu-tier-txt">{beg}</div>
+    <div class="rm-edu-wrap{' is-right' if align == 'right' else ''}">
+      <details class="{cls_str}">
+        <summary>
+          <span class="rm-edu-summary-left">
+            <span class="rm-edu-glyph" aria-hidden="true">&#9672;</span>
+            <span class="rm-edu-title">{_esc(title)}</span>
+            <span class="rm-edu-lvl-dots">L1&middot;L2&middot;L3</span>
+          </span>
+          {live_span}
+        </summary>
+        <div class="rm-edu-body">
+          <div class="rm-edu-tabs-wrap">
+            <details class="rm-edu-level is-l1" name="{grp_name}" open>
+              <summary><span class="rm-lvl-badge is-beg">L1</span> Plain English</summary>
+              <div class="rm-edu-tier-txt">{beg}</div>
+            </details>
+            <details class="rm-edu-level is-l2" name="{grp_name}">
+              <summary><span class="rm-lvl-badge is-int">L2</span> Live Tape</summary>
+              <div class="rm-edu-tier-txt">{inter}</div>
+            </details>
+            <details class="rm-edu-level is-l3" name="{grp_name}">
+              <summary><span class="rm-lvl-badge is-pro">L3</span> Desk Pro</summary>
+              <div class="rm-edu-tier-txt">{pro}</div>
+            </details>
           </div>
-          <div class="rm-edu-tier">
-            <div class="rm-edu-tier-tag is-int">Level 2 · Reading Live Tape</div>
-            <div class="rm-edu-tier-txt">{inter}</div>
-          </div>
-          <div class="rm-edu-tier">
-            <div class="rm-edu-tier-tag is-pro">Level 3 · Desk Quantitative</div>
-            <div class="rm-edu-tier-txt">{pro}</div>
-          </div>
+          <div class="rm-edu-thumb"><span>💡 Rule of Thumb:</span> {thumb}</div>
         </div>
-        <div class="rm-edu-thumb"><span>💡 Rule of Thumb:</span> {thumb}</div>
-      </div>
-    </details>
+      </details>
+    </div>
     """.splitlines())
     st.markdown(html_block, unsafe_allow_html=True)

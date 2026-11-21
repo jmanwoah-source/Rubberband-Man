@@ -684,22 +684,31 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-    # 1-Click Thematic ETF Quick-Filter Chips (2-column grid prevents sidebar ellipsis truncation)
+    # 1-Click Thematic ETF Quick-Filter Pill Rail (Compact Zero-Clutter Switcher)
     st.markdown("<div class='rm-sb-section-label'>Thematic ETF Quick-Filter</div>", unsafe_allow_html=True)
-    for idx_e in range(0, len(QUICK_THEMATIC_ETFS), 2):
-        row_etfs = QUICK_THEMATIC_ETFS[idx_e:idx_e + 2]
-        etf_cols = st.columns(2, gap="small")
-        for col_e, etf_sym in zip(etf_cols, row_etfs):
-            is_etf_act = st.session_state.selected_ticker == etf_sym
-            with col_e:
-                if st.button(
-                    etf_sym,
-                    key=f"sb_etf_chip_{etf_sym}",
-                    type="primary" if is_etf_act else "secondary",
-                    width="stretch",
-                ):
-                    _select_ticker_and_sector(etf_sym)
-                    st.rerun()
+
+    def _on_sb_etf_pick() -> None:
+        picked = st.session_state.get("sb_etf_pills")
+        cur_t = st.session_state.get("selected_ticker")
+        if picked and picked != cur_t:
+            _select_ticker_and_sector(picked)
+            st.session_state["_sb_etf_synced_tk"] = picked
+        elif picked is None and cur_t in QUICK_THEMATIC_ETFS:
+            st.session_state["sb_etf_pills"] = cur_t
+
+    _sb_cur_tk = st.session_state.get("selected_ticker")
+    if st.session_state.get("_sb_etf_synced_tk") != _sb_cur_tk:
+        st.session_state["sb_etf_pills"] = _sb_cur_tk if _sb_cur_tk in QUICK_THEMATIC_ETFS else None
+        st.session_state["_sb_etf_synced_tk"] = _sb_cur_tk
+
+    st.pills(
+        "Thematic ETFs",
+        options=QUICK_THEMATIC_ETFS,
+        selection_mode="single",
+        key="sb_etf_pills",
+        on_change=_on_sb_etf_pick,
+        label_visibility="collapsed",
+    )
 
     # DTE Posture & Delta Profile
     st.markdown("<div class='rm-sb-section-label'>DTE Posture & Delta Profile</div>", unsafe_allow_html=True)
@@ -1364,6 +1373,24 @@ ui_kit.section_header(
 )
 
 if ranked_by_conv:
+    _top_sc = ranked_by_conv[0]
+    _top_sc_m = _top_sc.get("metrics") or {}
+    _top_sc_qe = _top_sc.get("quant_edge") or _top_sc_m.get("quant_edge") or {}
+    _top_sc_tel = _top_sc.get("options_telemetry") or _top_sc_m.get("options_telemetry") or {}
+    edu.render_edu_drawer(
+        "scanner_matrix",
+        live_ctx={
+            "sector": st.session_state.selected_sector,
+            "top_symbol": _top_sc.get("symbol", active_ticker),
+            "net_ev_pct": _top_sc_qe.get("net_ev_pct", 0.0),
+            "win_rate_pct": _top_sc_m.get("empirical_win_rate_pct", 55.0),
+            "sample_n": _top_sc_m.get("empirical_sample_n", 40),
+            "vrp_pts": _top_sc_tel.get("vrp_vol_pts", 0.0),
+            "prefer_spread": _top_sc_tel.get("prefer_spread", False),
+        },
+        compact=True,
+        align="right",
+    )
     for r_idx, cand in enumerate(ranked_by_conv[:8], start=1):
         c_sym = cand["symbol"]
         c_m = cand.get("metrics", {})
@@ -1805,6 +1832,21 @@ with col_ticket:
         st.session_state.pop("schwab_active_leg", None)
         diary_views.render_schwab_order_dialog(prefill_payload, active_cand)
 
+    edu.render_edu_drawer(
+        "trade_ticket",
+        live_ctx={
+            "symbol": active_ticker,
+            "delta": t_delta,
+            "mid_price": t_mid,
+            "target_price": tgt_p,
+            "stop_price": inv_p,
+            "quarter_kelly_pct": q_kelly_pct,
+            "spread_pct": t_spr,
+        },
+        compact=True,
+        align="right",
+    )
+
 
 # =========================================================================
 # SECONDARY WORKSPACE: 4-TAB INSTITUTIONAL DRAWERS BELOW MAIN COCKPIT
@@ -1997,6 +2039,33 @@ with tab_surface:
             st.session_state["schwab_prefill_needs_sync"] = True
             st.session_state.pop("schwab_active_leg", None)
             diary_views.render_schwab_order_dialog(_surf_prefill, active_cand)
+
+        anatomy_fig = rbc.create_trade_anatomy_visual(
+            active_ticker,
+            metrics,
+            opt_telem=scrub_telem,
+            gamma_walls=gw_info,
+            near_opt=near_opt,
+            height=280,
+        )
+        st.plotly_chart(anatomy_fig, width="stretch", config={"displayModeBar": False, "responsive": True})
+        edu.render_edu_drawer(
+            "trade_anatomy",
+            live_ctx={
+                "symbol": active_ticker,
+                "spot": curr_price,
+                "vwma20": metrics.get("vwma20", curr_price),
+                "strike": scrub_telem.get("strike_used", t_strike),
+                "breakeven": scrub_telem.get("breakeven_hold_price", curr_price),
+                "target_price": tgt_p,
+                "stop_price": inv_p,
+                "call_wall": cw_k,
+                "put_wall": pw_k,
+                "gamma_flip": g_flip_k,
+            },
+            compact=True,
+            align="right",
+        )
 
         strike_dot_fig = rbc.create_ticker_options_strike_dot_matrix(
             active_ticker,

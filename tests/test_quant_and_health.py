@@ -350,6 +350,68 @@ class TestSecurityAndChartSafety(unittest.TestCase):
         )
         self.assertGreater(len(fig_dot.data), 0)
 
+    def test_edu_new_topics_and_exclusive_level_tabs(self):
+        new_topics = [
+            ("scanner_matrix", {"sector": '<script>alert(1)</script>', "top_symbol": "NVDA", "net_ev_pct": 6.4, "win_rate_pct": 64, "sample_n": 38, "vrp_pts": 5.2, "prefer_spread": True}),
+            ("trade_ticket", {"symbol": "AVGO", "delta": 0.54, "mid_price": 8.20, "target_price": 192.0, "stop_price": 170.0, "quarter_kelly_pct": 3.1, "spread_pct": 2.4}),
+            ("trade_anatomy", {"symbol": "TSM", "spot": 190.0, "vwma20": 195.0, "strike": 185.0, "breakeven": 194.2, "target_price": 201.0, "stop_price": 180.0, "call_wall": 205.0}),
+            ("journal_audit", {"snapshot_date": "2026-11-20", "win_rate_pct": 68.0, "avg_dir_pct": 2.1, "avg_opt_roi_pct": 14.5, "count": 25}),
+            ("mobile_hero", {"symbol": "SMH", "z_score_5d": -1.85, "ou_half_life": 4.1, "conviction_score_200": 118, "contract_cost": 420.0, "breakeven": 248.0}),
+        ]
+        for key, ctx in new_topics:
+            built = edu_annotations._build_topic(key, ctx)
+            self.assertIsNotNone(built, f"Missing edu topic: {key}")
+            title, live, beg, inter, pro, thumb = built
+            self.assertTrue(all(isinstance(x, str) and len(x) > 0 for x in (title, live, beg, inter, pro, thumb)))
+            if key == "scanner_matrix":
+                self.assertNotIn("<script>", live)
+                self.assertIn("&lt;script&gt;", live)
+
+        rendered_chunks = []
+        with mock.patch("streamlit.markdown", side_effect=lambda body, **kw: rendered_chunks.append(body)):
+            with mock.patch.object(edu_annotations, "is_learn_mode", return_value=True):
+                edu_annotations.render_edu_drawer("trade_anatomy", new_topics[2][1], compact=True, align="right")
+
+        self.assertEqual(len(rendered_chunks), 1)
+        html_out = rendered_chunks[0]
+        self.assertIn("&#9672;", html_out)
+        self.assertIn('class="rm-edu-level is-l1"', html_out)
+        self.assertIn('class="rm-edu-level is-l2"', html_out)
+        self.assertIn('class="rm-edu-level is-l3"', html_out)
+        self.assertIn('name="rm-edu-', html_out)
+        self.assertNotIn("<input", html_out.lower())
+
+    def test_create_trade_anatomy_visual_full_and_none_inputs(self):
+        fig_full = rbc.create_trade_anatomy_visual(
+            "NVDA",
+            metrics={
+                "price": 135.0,
+                "vwma20": 139.5,
+                "atr14": 4.2,
+                "action": "BUY CALL",
+                "target_price": 144.0,
+                "invalidation_price": 128.0,
+                "recommended_strike": 132.0,
+                "p10_close_pct": -5.0,
+                "p25_close_pct": -2.0,
+                "p75_close_pct": 4.5,
+                "p90_close_pct": 8.0,
+            },
+            opt_telem={"strike_used": 132.0, "prem_entry": 6.4, "breakeven_hold_price": 136.2},
+            gamma_walls={"put_wall_strike": 125.0, "gamma_flip_strike": 137.0, "call_wall_strike": 150.0},
+            near_opt={"strike": 132.0, "mid": 6.4},
+        )
+        self.assertGreater(len(fig_full.data), 4)
+
+        fig_empty = rbc.create_trade_anatomy_visual(
+            "TEST",
+            metrics={"price": None, "vwma20": None, "target_price": None, "invalidation_price": None},
+            opt_telem=None,
+            gamma_walls=None,
+            near_opt=None,
+        )
+        self.assertGreater(len(fig_empty.data), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

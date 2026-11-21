@@ -1323,13 +1323,57 @@ def get_custom_css() -> str:
         font-weight: 800 !important;
     }
 
-    /* Segmented Control */
+    /* Segmented Control & Native Horizontal Pill Rails (st.pills) */
     [data-testid="stSegmentedControl"] {
         background: rgba(13, 16, 23, 0.76) !important;
         backdrop-filter: blur(18px) !important;
         border: 1px solid rgba(255, 255, 255, 0.08) !important;
         border-radius: 9999px !important;
         padding: 3px !important;
+    }
+    [data-testid="stButtonGroup"],
+    [data-testid="stPills"] {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 6px !important;
+    }
+    button[data-testid="stBaseButton-pills"] {
+        background: rgba(15, 19, 28, 0.78) !important;
+        border: 1px solid rgba(255, 255, 255, 0.09) !important;
+        color: #CBD5E1 !important;
+        border-radius: 9999px !important;
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 0.72rem !important;
+        font-weight: 700 !important;
+        padding: 4px 11px !important;
+        min-height: 30px !important;
+        height: auto !important;
+        line-height: 1.2 !important;
+        transition: transform 0.14s ease, border-color 0.18s ease, background 0.18s ease, color 0.18s ease !important;
+    }
+    button[data-testid="stBaseButton-pills"]:hover {
+        border-color: rgba(255, 107, 0, 0.45) !important;
+        color: #F8FAFC !important;
+        background: rgba(255, 107, 0, 0.10) !important;
+    }
+    button[data-testid="stBaseButton-pills"]:active,
+    button[data-testid="stBaseButton-pillsActive"]:active {
+        transform: scale(0.95) !important;
+    }
+    button[data-testid="stBaseButton-pillsActive"] {
+        background: linear-gradient(135deg, rgba(255, 107, 0, 0.24) 0%, rgba(255, 133, 51, 0.16) 100%) !important;
+        border: 1px solid rgba(255, 107, 0, 0.68) !important;
+        color: #FF8533 !important;
+        border-radius: 9999px !important;
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 0.72rem !important;
+        font-weight: 800 !important;
+        padding: 4px 11px !important;
+        min-height: 30px !important;
+        height: auto !important;
+        line-height: 1.2 !important;
+        box-shadow: 0 0 14px -3px rgba(255, 107, 0, 0.35) !important;
+        transition: transform 0.14s ease, box-shadow 0.18s ease !important;
     }
 
     /* Chat Messages */
@@ -1834,27 +1878,28 @@ def get_custom_css() -> str:
 
     .st-key-rm_mobile_bottom_dock {
         position: fixed !important;
-        bottom: 14px !important;
+        bottom: 12px !important;
         left: 50% !important;
         transform: translateX(-50%) !important;
-        width: calc(100% - 24px) !important;
+        width: calc(100% - 16px) !important;
         max-width: 500px !important;
         z-index: 999999 !important;
-        background: rgba(11, 14, 20, 0.88) !important;
-        backdrop-filter: blur(24px) saturate(155%) !important;
-        -webkit-backdrop-filter: blur(24px) saturate(155%) !important;
+        background: rgba(11, 14, 20, 0.90) !important;
+        backdrop-filter: blur(24px) saturate(160%) !important;
+        -webkit-backdrop-filter: blur(24px) saturate(160%) !important;
         border: 1px solid rgba(255, 255, 255, 0.12) !important;
-        border-top: 1px solid rgba(255, 107, 0, 0.35) !important;
+        border-top: 1px solid rgba(255, 107, 0, 0.38) !important;
         border-radius: 9999px !important;
-        padding: 6px 10px max(6px, env(safe-area-inset-bottom)) 10px !important;
+        padding: 5px 6px max(5px, env(safe-area-inset-bottom)) 6px !important;
         box-shadow: 0 16px 40px rgba(0, 0, 0, 0.85), 0 0 22px -4px rgba(255, 107, 0, 0.22) !important;
+        overflow: visible !important;
     }
     .st-key-rm_mobile_bottom_dock [data-testid="stHorizontalBlock"] {
         display: flex !important;
         flex-direction: row !important;
         flex-wrap: nowrap !important;
         align-items: center !important;
-        gap: 6px !important;
+        gap: 4px !important;
     }
     .st-key-rm_mobile_bottom_dock [data-testid="stColumn"],
     .st-key-rm_mobile_bottom_dock [data-testid="column"] {
@@ -1867,12 +1912,15 @@ def get_custom_css() -> str:
     .st-key-dock_btn_ledger button,
     .st-key-dock_btn_pro_mode button {
         border-radius: 9999px !important;
-        font-size: 0.71rem !important;
+        font-size: 0.72rem !important;
         font-weight: 800 !important;
-        padding: 2px 4px !important;
+        letter-spacing: 0.01em !important;
+        padding: 0 4px !important;
         min-height: 44px !important;
         height: 44px !important;
         white-space: nowrap !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
     }
 
     @media (max-width: 768px) {
@@ -1890,6 +1938,11 @@ def get_custom_css() -> str:
         button[data-testid="stBaseButton-secondary"],
         button[data-testid="baseButton-primary"],
         button[data-testid="baseButton-secondary"] { min-height: 44px !important; }
+        [data-testid="stPlotlyChart"],
+        .stPlotlyChart {
+            max-width: 100% !important;
+            overflow-x: clip !important;
+        }
     }
 
     /* ========================================================= */
@@ -2553,112 +2606,171 @@ def get_custom_css() -> str:
     }
 
     /* ========================================================= */
-    /* PROGRESSIVE EDUCATIONAL DRAWERS (LEARN MODE)              */
+    /* PROGRESSIVE EDUCATIONAL CHIPS & 3-LEVEL TABS (LEARN MODE) */
     /* ========================================================= */
-    details.rm-edu-drawer {
-        background: rgba(13, 17, 25, 0.72) !important;
-        backdrop-filter: blur(16px) !important;
-        -webkit-backdrop-filter: blur(16px) !important;
-        border: 1px solid rgba(56, 189, 248, 0.20) !important;
-        border-radius: 12px !important;
+    .rm-edu-wrap {
+        display: flex !important;
+        width: 100% !important;
+        justify-content: flex-start !important;
+        margin: 4px 0 8px 0 !important;
+    }
+    .rm-edu-wrap.is-right {
+        justify-content: flex-end !important;
+    }
+    details.rm-edu-drawer.rm-edu-chip {
+        background: rgba(13, 17, 25, 0.78) !important;
+        backdrop-filter: blur(18px) !important;
+        -webkit-backdrop-filter: blur(18px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 9999px !important;
         padding: 0 !important;
-        margin: 8px 0 14px 0 !important;
-        transition: border-color 0.18s ease, box-shadow 0.18s ease !important;
+        margin: 0 !important;
+        width: 100% !important;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease, border-radius 0.18s ease, background 0.18s ease !important;
     }
-    details.rm-edu-drawer.rm-edu-compact {
-        margin: 6px 0 10px 0 !important;
+    details.rm-edu-drawer.rm-edu-chip.rm-edu-compact:not([open]) {
+        width: fit-content !important;
+        max-width: 100% !important;
     }
-    details.rm-edu-drawer:hover,
-    details.rm-edu-drawer[open] {
+    details.rm-edu-drawer.rm-edu-chip[open] {
+        width: 100% !important;
+        border-radius: 14px !important;
+        border-color: rgba(56, 189, 248, 0.40) !important;
+        box-shadow: 0 12px 28px -10px rgba(0, 0, 0, 0.72), 0 0 18px -4px rgba(56, 189, 248, 0.16) !important;
+    }
+    details.rm-edu-drawer.rm-edu-chip:hover {
         border-color: rgba(56, 189, 248, 0.42) !important;
-        box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.65), 0 0 14px -4px rgba(56, 189, 248, 0.16) !important;
+        background: rgba(17, 23, 34, 0.88) !important;
     }
-    details.rm-edu-drawer > summary {
+    details.rm-edu-drawer.rm-edu-chip > summary {
         list-style: none !important;
         cursor: pointer !important;
-        padding: 9px 14px !important;
+        padding: 6px 12px !important;
         display: flex !important;
         align-items: center !important;
         justify-content: space-between !important;
         gap: 10px !important;
         flex-wrap: wrap !important;
         user-select: none !important;
+        transition: transform 0.12s ease !important;
     }
-    details.rm-edu-drawer > summary::-webkit-details-marker {
+    details.rm-edu-drawer.rm-edu-chip > summary:active {
+        transform: scale(0.985) !important;
+    }
+    details.rm-edu-drawer.rm-edu-chip > summary::-webkit-details-marker {
         display: none !important;
     }
     .rm-edu-summary-left {
         display: flex !important;
         align-items: center !important;
-        gap: 8px !important;
+        gap: 7px !important;
+        min-width: 0 !important;
     }
-    .rm-edu-pill {
-        background: rgba(56, 189, 248, 0.14) !important;
-        color: #38BDF8 !important;
-        border: 1px solid rgba(56, 189, 248, 0.35) !important;
+    .rm-edu-glyph {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 20px !important;
+        height: 20px !important;
         border-radius: 9999px !important;
-        font-size: 0.66rem !important;
-        font-weight: 800 !important;
-        letter-spacing: 0.05em !important;
-        padding: 2px 8px !important;
-        white-space: nowrap !important;
+        font-size: 0.72rem !important;
+        font-weight: 900 !important;
+        color: #38BDF8 !important;
+        background: linear-gradient(135deg, rgba(56, 189, 248, 0.18) 0%, rgba(255, 107, 0, 0.16) 100%) !important;
+        border: 1px solid rgba(56, 189, 248, 0.40) !important;
+        box-shadow: 0 0 10px -2px rgba(56, 189, 248, 0.42) !important;
+        flex-shrink: 0 !important;
     }
     .rm-edu-title {
         color: #E2E8F0 !important;
-        font-size: 0.79rem !important;
+        font-size: 0.74rem !important;
         font-weight: 700 !important;
+        letter-spacing: -0.01em !important;
+    }
+    .rm-edu-lvl-dots {
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 0.61rem !important;
+        font-weight: 800 !important;
+        color: #94A3B8 !important;
+        background: rgba(255, 255, 255, 0.04) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 9999px !important;
+        padding: 1px 7px !important;
+        letter-spacing: 0.04em !important;
+        white-space: nowrap !important;
+        flex-shrink: 0 !important;
     }
     .rm-edu-live {
         font-family: 'JetBrains Mono', monospace !important;
-        font-size: 0.70rem !important;
+        font-size: 0.68rem !important;
         color: #94A3B8 !important;
         font-variant-numeric: tabular-nums !important;
     }
     .rm-edu-body {
         border-top: 1px solid rgba(255, 255, 255, 0.06) !important;
-        padding: 12px 14px 13px 14px !important;
+        padding: 10px 12px 12px 12px !important;
     }
-    .rm-edu-grid {
-        display: grid !important;
-        grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-        gap: 10px !important;
+    .rm-edu-tabs-wrap {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 6px !important;
     }
-    @media (max-width: 820px) {
-        .rm-edu-grid {
-            grid-template-columns: 1fr !important;
-        }
-    }
-    .rm-edu-tier {
-        background: rgba(8, 10, 16, 0.65) !important;
-        border: 1px solid rgba(255, 255, 255, 0.06) !important;
+    details.rm-edu-level {
+        background: rgba(8, 10, 16, 0.68) !important;
+        border: 1px solid rgba(255, 255, 255, 0.07) !important;
         border-radius: 10px !important;
-        padding: 10px 12px !important;
+        overflow: hidden !important;
+        transition: border-color 0.16s ease, background 0.16s ease !important;
     }
-    .rm-edu-tier-tag {
-        font-size: 0.66rem !important;
+    details.rm-edu-level.is-l1[open] { border-color: rgba(52, 211, 153, 0.42) !important; }
+    details.rm-edu-level.is-l2[open] { border-color: rgba(56, 189, 248, 0.42) !important; }
+    details.rm-edu-level.is-l3[open] { border-color: rgba(167, 139, 250, 0.42) !important; }
+    details.rm-edu-level > summary {
+        list-style: none !important;
+        cursor: pointer !important;
+        padding: 7px 10px !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+        font-size: 0.72rem !important;
         font-weight: 800 !important;
-        text-transform: uppercase !important;
-        letter-spacing: 0.05em !important;
-        margin-bottom: 5px !important;
-    }
-    .rm-edu-tier-tag.is-beg { color: #34D399 !important; }
-    .rm-edu-tier-tag.is-int { color: #38BDF8 !important; }
-    .rm-edu-tier-tag.is-pro { color: #A78BFA !important; }
-    .rm-edu-tier-txt {
-        font-size: 0.77rem !important;
-        line-height: 1.52 !important;
         color: #CBD5E1 !important;
+        letter-spacing: 0.02em !important;
+        user-select: none !important;
+    }
+    details.rm-edu-level > summary::-webkit-details-marker {
+        display: none !important;
+    }
+    details.rm-edu-level > summary:hover {
+        background: rgba(255, 255, 255, 0.03) !important;
+        color: #F8FAFC !important;
+    }
+    .rm-lvl-badge {
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 0.62rem !important;
+        font-weight: 900 !important;
+        padding: 1px 6px !important;
+        border-radius: 9999px !important;
+    }
+    .rm-lvl-badge.is-beg { color: #34D399 !important; background: rgba(52, 211, 153, 0.14) !important; border: 1px solid rgba(52, 211, 153, 0.36) !important; }
+    .rm-lvl-badge.is-int { color: #38BDF8 !important; background: rgba(56, 189, 248, 0.14) !important; border: 1px solid rgba(56, 189, 248, 0.36) !important; }
+    .rm-lvl-badge.is-pro { color: #A78BFA !important; background: rgba(167, 139, 250, 0.14) !important; border: 1px solid rgba(167, 139, 250, 0.36) !important; }
+    .rm-edu-tier-txt {
+        font-size: 0.76rem !important;
+        line-height: 1.54 !important;
+        color: #CBD5E1 !important;
+        padding: 0 11px 10px 11px !important;
     }
     .rm-edu-tier-txt b {
-        color: #F1F5F9 !important;
+        color: #F8FAFC !important;
     }
     .rm-edu-thumb {
-        margin-top: 10px !important;
+        margin-top: 8px !important;
         background: rgba(255, 107, 0, 0.08) !important;
         border: 1px solid rgba(255, 107, 0, 0.25) !important;
         border-radius: 8px !important;
         padding: 7px 11px !important;
-        font-size: 0.75rem !important;
+        font-size: 0.73rem !important;
         color: #E2E8F0 !important;
         line-height: 1.45 !important;
     }

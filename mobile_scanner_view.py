@@ -390,33 +390,64 @@ def render_mobile_scanner_page(
             on_change=_on_mobile_quick_search,
         )
 
-    # 1-Tap Thematic ETF Filter Chips (All 8: REMX, SRVR, ROBO, JEDI, SMH, URA, QTUM, IGV)
-    for row_start in (0, 4):
-        etf_row = st.columns(4, gap="small")
-        for idx, etf_sym in enumerate(_THEMATIC_ETF_CHIPS[row_start:row_start + 4]):
-            with etf_row[idx]:
-                if st.button(etf_sym, key=f"mob_etf_{etf_sym}", width="stretch", type="primary" if etf_sym == active_ticker else "secondary"):
-                    st.session_state.selected_ticker = etf_sym
-                    st.rerun()
+    # Compact Thematic ETF Horizontal Pill Rail (Zero Vertical Stacking)
+    def _on_mob_etf_pick() -> None:
+        picked = st.session_state.get("mob_etf_pills")
+        cur_tk = st.session_state.get("selected_ticker")
+        if picked and picked != cur_tk:
+            st.session_state.selected_ticker = picked
+            st.session_state["_mob_pills_synced_tk"] = picked
+        elif picked is None and cur_tk in _THEMATIC_ETF_CHIPS:
+            st.session_state["mob_etf_pills"] = cur_tk
 
-    # Fast Top-5 Pill Bar (interactive buttons so tapping actually selects the ticker)
+    top5_labels: List[str] = []
+    top5_map: Dict[str, str] = {}
+    top5_default: Optional[str] = None
     if ranked_sector_candidates:
-        top5_m = ranked_sector_candidates[:5]
-        pill_cols = st.columns(len(top5_m), gap="small")
-        for p_col, c in zip(pill_cols, top5_m):
-            c_sym = str(c.get("symbol", ""))
+        for c in ranked_sector_candidates[:5]:
+            c_sym = str(c.get("symbol", "")).strip()
             c_act = str((c.get("metrics") or {}).get("action", ""))
             c_s200, _, _, _ = _extract_cand_conviction_and_dte(c, c_act)
-            with p_col:
-                if st.button(
-                    f"{c_sym} {c_s200:+d}",
-                    key=f"mob_top5_pill_{c_sym}",
-                    type="primary" if c_sym == active_ticker else "secondary",
-                    width="stretch",
-                ):
-                    if c_sym != active_ticker:
-                        st.session_state.selected_ticker = c_sym
-                        st.rerun()
+            lbl = f"{c_sym} {c_s200:+d}"
+            top5_labels.append(lbl)
+            top5_map[lbl] = c_sym
+            if c_sym == active_ticker:
+                top5_default = lbl
+
+    def _on_mob_top5_pick() -> None:
+        picked_lbl = st.session_state.get("mob_top5_pills")
+        picked_sym = top5_map.get(picked_lbl) if picked_lbl else None
+        cur_tk = st.session_state.get("selected_ticker")
+        if picked_sym and picked_sym != cur_tk:
+            st.session_state.selected_ticker = picked_sym
+            st.session_state["_mob_pills_synced_tk"] = picked_sym
+        elif picked_lbl is None and cur_tk in top5_map.values():
+            st.session_state["mob_top5_pills"] = next((k for k, v in top5_map.items() if v == cur_tk), None)
+
+    etf_default = active_ticker if active_ticker in _THEMATIC_ETF_CHIPS else None
+    if st.session_state.get("_mob_pills_synced_tk") != active_ticker:
+        st.session_state["mob_etf_pills"] = etf_default
+        st.session_state["mob_top5_pills"] = top5_default
+        st.session_state["_mob_pills_synced_tk"] = active_ticker
+
+    st.pills(
+        "Thematic ETFs",
+        options=_THEMATIC_ETF_CHIPS,
+        selection_mode="single",
+        key="mob_etf_pills",
+        on_change=_on_mob_etf_pick,
+        label_visibility="collapsed",
+    )
+
+    if top5_labels:
+        st.pills(
+            "Sector Top-5",
+            options=top5_labels,
+            selection_mode="single",
+            key="mob_top5_pills",
+            on_change=_on_mob_top5_pick,
+            label_visibility="collapsed",
+        )
 
     # 2. CIRCULAR 5-DAY CATALYST RING STRIP (FROSTED GLASS)
     cat_data = _get_5day_catalyst_safe(curr_sec, active_ticker, radar_24_48, catalyst_outlook)
@@ -525,51 +556,68 @@ def render_mobile_scanner_page(
     """.splitlines())
     st.markdown(_hero_html, unsafe_allow_html=True)
 
-    # 1-TAP HYPER-ORANGE SCHWAB SIMULATOR EXECUTION BUTTON
-    if st.button("⚡ 1-Tap Simulate in Schwab Practice Desk", key=f"mobile_btn_sim_schwab_{active_ticker}", type="primary", width="stretch"):
-        mob_dte = opt_dte or rec_dte
-        if opt_exp and len(str(opt_exp)) >= 10:
+    # RESTRAINED ACTION CTA + LOW-PROFILE ◈ HERO LEARN CHIP
+    col_cta, col_learn = st.columns([1.35, 1.15], gap="small", vertical_alignment="center")
+    with col_cta:
+        if st.button("⚡ Simulate in Schwab", key=f"mobile_btn_sim_schwab_{active_ticker}", type="primary", width="stretch"):
+            mob_dte = opt_dte or rec_dte
+            if opt_exp and len(str(opt_exp)) >= 10:
+                try:
+                    exp_dt = datetime.date.fromisoformat(str(opt_exp)[:10])
+                    today_ny = rbe3.get_ny_now().date() if hasattr(rbe3, "get_ny_now") else datetime.date.today()
+                    mob_dte = max(1, (exp_dt - today_ny).days)
+                except Exception:
+                    pass
+            st.session_state["schwab_prefill"] = {
+                "symbol": active_ticker,
+                "action": "BUY_TO_OPEN",
+                "option_type": "CALL" if is_call else "PUT",
+                "strike": opt_strike,
+                "expiration": opt_exp,
+                "expiration_date": opt_exp,
+                "dte": mob_dte,
+                "recommended_dte": rec_dte,
+                "dte_rationale": dte_rat,
+                "conviction_score_200": score_200,
+                "conviction_score": score_200,
+                "contracts": 1,
+                "order_type": "LIMIT",
+                "limit_price": opt_mid,
+                "current_mid": opt_mid,
+                "spot_price": curr_price,
+                "current_stock_price": curr_price,
+                "target_price": tgt_p,
+                "stop_price": inv_p,
+                "notes": f"Mobile 1-Tap Signal: {action} on {active_ticker} ({playbook_name} | Conv {score_200:+d} | {z_val:+.2f}σ). Target Exp: {opt_exp}."
+            }
+            if "schwab_active_leg" in st.session_state:
+                del st.session_state["schwab_active_leg"]
+            st.session_state["schwab_prefill_needs_sync"] = True
+            st.session_state["pending_workspace_view"] = "Charles Schwab Practice Desk & Diary"
+            st.session_state["active_app_view"] = "Charles Schwab Practice Desk & Diary"
+            st.session_state["mobile_workspace_nav_select_top"] = "Charles Schwab Practice Desk & Diary"
             try:
-                exp_dt = datetime.date.fromisoformat(str(opt_exp)[:10])
-                today_ny = rbe3.get_ny_now().date() if hasattr(rbe3, "get_ny_now") else datetime.date.today()
-                mob_dte = max(1, (exp_dt - today_ny).days)
+                st.query_params["page"] = "schwab"
             except Exception:
                 pass
-        st.session_state["schwab_prefill"] = {
-            "symbol": active_ticker,
-            "action": "BUY_TO_OPEN",
-            "option_type": "CALL" if is_call else "PUT",
-            "strike": opt_strike,
-            "expiration": opt_exp,
-            "expiration_date": opt_exp,
-            "dte": mob_dte,
-            "recommended_dte": rec_dte,
-            "dte_rationale": dte_rat,
-            "conviction_score_200": score_200,
-            "conviction_score": score_200,
-            "contracts": 1,
-            "order_type": "LIMIT",
-            "limit_price": opt_mid,
-            "current_mid": opt_mid,
-            "spot_price": curr_price,
-            "current_stock_price": curr_price,
-            "target_price": tgt_p,
-            "stop_price": inv_p,
-            "notes": f"Mobile 1-Tap Signal: {action} on {active_ticker} ({playbook_name} | Conv {score_200:+d} | {z_val:+.2f}σ). Target Exp: {opt_exp}."
-        }
-        if "schwab_active_leg" in st.session_state:
-            del st.session_state["schwab_active_leg"]
-        st.session_state["schwab_prefill_needs_sync"] = True
-        st.session_state["pending_workspace_view"] = "Charles Schwab Practice Desk & Diary"
-        st.session_state["active_app_view"] = "Charles Schwab Practice Desk & Diary"
-        st.session_state["mobile_workspace_nav_select_top"] = "Charles Schwab Practice Desk & Diary"
-        try:
-            st.query_params["page"] = "schwab"
-        except Exception:
-            pass
-        st.rerun()
+            st.rerun()
+    with col_learn:
+        if _edu is not None:
+            _edu.render_edu_drawer(
+                "mobile_hero",
+                {
+                    "symbol": active_ticker,
+                    "z_score_5d": z_val,
+                    "ou_half_life": ou_hl,
+                    "conviction_score_200": score_200,
+                    "contract_cost": opt_cost,
+                    "breakeven": opt_be,
+                },
+                compact=True,
+                align="right",
+            )
 
-    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
     # 4. MOBILE TABBED EXPLORATION
     m_tab_chart, m_tab_cands, m_tab_greeks, m_tab_radar = st.tabs([
@@ -585,15 +633,50 @@ def render_mobile_scanner_page(
             t_series = _cached_mobile_hist_series(active_ticker)
             chart_fig = rbc.create_rubberband_envelope_visual(active_ticker, metrics, t_series)
             chart_fig.update_layout(
-                height=320,
-                margin=dict(l=10, r=10, t=25, b=25),
-                autosize=True
+                height=300,
+                margin=dict(l=8, r=8, t=18, b=24),
+                showlegend=False,
+                autosize=True,
             )
             st.plotly_chart(chart_fig, width="stretch", config={"displayModeBar": False, "responsive": True})
         except Exception:
             st.info(f"Chart temporarily syncing for {active_ticker}...")
 
-        st.caption("Includes 20-day equilibrium VWMA, 35-day ATR boundary, and 5-day O-U mean-reversion cone.")
+        st.caption("Orange: VWMA-20 · Green/Red Bands: ±2σ Stretch · Cone: 5D Projection.")
+
+        _mob_gw = active_cand.get("gamma_walls") or metrics.get("gamma_walls") or {}
+        _mob_telem = active_cand.get("options_telemetry") or metrics.get("options_telemetry") or {}
+        if hasattr(rbc, "create_trade_anatomy_visual"):
+            try:
+                anatomy_fig = rbc.create_trade_anatomy_visual(
+                    active_ticker,
+                    metrics,
+                    opt_telem=_mob_telem,
+                    gamma_walls=_mob_gw,
+                    near_opt=near_opt,
+                    height=245,
+                )
+                st.plotly_chart(anatomy_fig, width="stretch", config={"displayModeBar": False, "responsive": True})
+                if _edu is not None:
+                    _edu.render_edu_drawer(
+                        "trade_anatomy",
+                        {
+                            "symbol": active_ticker,
+                            "spot": curr_price,
+                            "vwma20": metrics.get("vwma20", curr_price),
+                            "strike": opt_strike,
+                            "breakeven": opt_be,
+                            "target_price": tgt_p,
+                            "stop_price": inv_p,
+                            "call_wall": _mob_gw.get("call_wall_strike", 0.0),
+                            "put_wall": _mob_gw.get("put_wall_strike", 0.0),
+                            "gamma_flip": _mob_gw.get("gamma_flip_strike", 0.0),
+                        },
+                        compact=True,
+                        align="right",
+                    )
+            except Exception:
+                pass
 
     with m_tab_cands:
         st.markdown(f"<div style='font-size: 0.74rem; font-weight: 800; color: #94A3B8; text-transform: uppercase; margin-bottom: 8px;'>Top Vetted &amp; Sector Candidates ({_esc(curr_sec)})</div>", unsafe_allow_html=True)

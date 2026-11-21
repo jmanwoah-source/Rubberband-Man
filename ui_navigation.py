@@ -287,7 +287,7 @@ def render_mobile_bottom_dock(current_view: str) -> None:
         with dock_c1:
             is_active = (current_view == VIEW_TERMINAL)
             if st.button(
-                "⚡ Term",
+                "⚡ Scan",
                 key="dock_btn_scanner",
                 type="primary" if is_active else "secondary",
                 width="stretch",
@@ -297,7 +297,7 @@ def render_mobile_bottom_dock(current_view: str) -> None:
         with dock_c2:
             is_active = (current_view == VIEW_SCHWAB)
             if st.button(
-                "📓 Schwab",
+                "📓 Sim",
                 key="dock_btn_schwab",
                 type="primary" if is_active else "secondary",
                 width="stretch",
@@ -307,7 +307,7 @@ def render_mobile_bottom_dock(current_view: str) -> None:
         with dock_c3:
             is_active = (current_view == VIEW_JOURNAL)
             if st.button(
-                "📊 Journal",
+                "📊 Log",
                 key="dock_btn_ledger",
                 type="primary" if is_active else "secondary",
                 width="stretch",

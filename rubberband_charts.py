@@ -242,13 +242,13 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
 
     fig = go.Figure()
 
-    # 1. Upper Overbought Exhaustion Zone (+1.5σ to +2.35σ)
+    # 1. Upper Overbought Exhaustion Zone (+1.35σ to +2.00σ)
     fig.add_trace(go.Scatter(
         x=df.index,
         y=df["upper_outer"],
         mode="lines",
         line=dict(color="rgba(244, 63, 94, 0.55)", width=1.2, dash="dot"),
-        name="Overbought Exhaustion (+2.35σ)",
+        name="Overbought Exhaustion (+2.0σ)",
         hoverinfo="skip"
     ))
     fig.add_trace(go.Scatter(
@@ -258,12 +258,12 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
         line=dict(color="rgba(244, 63, 94, 0.25)", width=1.0, dash="dot"),
         fill="tonexty",
         fillcolor="rgba(244, 63, 94, 0.11)",
-        name="Upper Stretch Zone (+1.5σ)",
+        name="Upper Stretch Zone (+1.35σ)",
         hoverinfo="skip",
         showlegend=False
     ))
 
-    # 2. Inner Equilibrium Corridor (+1.5σ to -1.5σ)
+    # 2. Inner Equilibrium Corridor (+1.35σ to -1.35σ)
     fig.add_trace(go.Scatter(
         x=df.index,
         y=df["lower_inner"],
@@ -276,7 +276,7 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
         showlegend=False
     ))
 
-    # 3. Lower Oversold Snapback Zone (-1.5σ to -2.35σ)
+    # 3. Lower Oversold Snapback Zone (-1.35σ to -2.00σ)
     fig.add_trace(go.Scatter(
         x=df.index,
         y=df["lower_outer"],
@@ -284,7 +284,7 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
         line=dict(color="rgba(16, 185, 129, 0.55)", width=1.2, dash="dot"),
         fill="tonexty",
         fillcolor="rgba(16, 185, 129, 0.12)",
-        name="Oversold Snapback (-2.35σ)",
+        name="Oversold Snapback (-2.0σ)",
         hoverinfo="skip"
     ))
 
@@ -371,19 +371,23 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
         hovertemplate=f"<b>LIVE SPOT ({ticker}):</b> ${live_p:.2f}<extra></extra>"
     ))
 
-    # Reference Horizontal Lines
+    # Reference Horizontal Lines — orient target vs strike annotations outward so they never overlap
+    _tgt_above = (target_p >= strike)
+    _strike_pos = "bottom left" if _tgt_above else "top left"
+    _tgt_pos = "top left" if _tgt_above else "bottom left"
+
     fig.add_hline(
         y=strike,
         line_dash="dash",
         line_color=strike_color,
         line_width=1.8,
         annotation_text=f" 🎯 30–45D {action} Strike: ${strike:.2f} (Δ {est_delta_disp:+.2f}) ",
-        annotation_position="top left",
-        annotation_font=dict(color=strike_color, size=10.5, family="Plus Jakarta Sans"),
+        annotation_position=_strike_pos,
+        annotation_font=dict(color=strike_color, size=10.0, family="Plus Jakarta Sans"),
         annotation_bgcolor="rgba(10, 12, 18, 0.90)",
         annotation_bordercolor=strike_color,
         annotation_borderwidth=1,
-        annotation_borderpad=3
+        annotation_borderpad=2.5
     )
 
     if abs(target_p - strike) / max(1.0, strike) > 0.012:
@@ -393,7 +397,7 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
             line_color="#FF6B00",
             line_width=1.5,
             annotation_text=f" 🧲 1–5D Target: ${target_p:.2f} ",
-            annotation_position="bottom left",
+            annotation_position=_tgt_pos,
             annotation_font=dict(color="#FB923C", size=10, family="Plus Jakarta Sans"),
             annotation_bgcolor="rgba(10, 12, 18, 0.88)",
             annotation_bordercolor="rgba(255, 107, 0, 0.50)",
@@ -3398,4 +3402,278 @@ def create_float_topology_card_html(symbol: str, float_data: Dict[str, Any]) -> 
         f'<span style="color: #E2E8F0; margin-left: 4px;">{collar_advice}</span></div>'
         f'</div></div>'
     )
+
+
+def create_trade_anatomy_visual(
+    symbol: str,
+    metrics: Optional[Dict[str, Any]],
+    opt_telem: Optional[Dict[str, Any]] = None,
+    gamma_walls: Optional[Dict[str, Any]] = None,
+    near_opt: Optional[Dict[str, Any]] = None,
+    height: int = 285,
+) -> go.Figure:
+    """
+    Beginner-to-Pro Flagship Chart: Trade Anatomy & 5Y Probability Corridor.
+    Maps Spot, VWMA-20 equilibrium, Hard Stop, Option Strike K, Expiration Breakeven BE,
+    +1 sigma Target, and OPRA Dealer Put/Call Walls & Gamma Flip onto one clean price ruler
+    overlaid with the 5-year empirical P10-P90 and P25-P75 5-day return bands.
+    """
+    m = metrics or {}
+    telem = opt_telem or {}
+    gw = gamma_walls or m.get("gamma_walls") or {}
+    n_opt = near_opt or {}
+
+    sym = _html.escape((symbol or "TICKER").strip().upper())
+    try:
+        spot = float(m.get("price") or 100.0)
+    except (TypeError, ValueError):
+        spot = 100.0
+    if not math.isfinite(spot) or spot <= 0.0:
+        spot = 100.0
+
+    def _safe_px(val: Any, fallback: float) -> float:
+        try:
+            v = float(val)
+            return v if (math.isfinite(v) and v > 0.0) else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    atr14 = _safe_px(m.get("atr14"), spot * 0.032)
+    vwma20 = _safe_px(m.get("vwma20") or m.get("sma20"), spot)
+    action = str(m.get("action") or "BUY CALL").upper()
+    is_put = ("PUT" in action)
+
+    tgt_p = _safe_px(
+        m.get("target_price"),
+        spot - 1.8 * atr14 if is_put else spot + 1.8 * atr14,
+    )
+    stp_p = _safe_px(
+        m.get("invalidation_price"),
+        max(0.5, spot + 1.6 * atr14) if is_put else max(0.5, spot - 1.6 * atr14),
+    )
+    strike_k = _safe_px(
+        n_opt.get("strike") or telem.get("strike_used") or m.get("recommended_strike"),
+        spot,
+    )
+    opt_mid = _safe_px(
+        n_opt.get("mid") or telem.get("prem_entry"),
+        max(0.25, spot * 0.035),
+    )
+    be_fallback = max(0.5, strike_k - opt_mid) if is_put else (strike_k + opt_mid)
+    be_px = _safe_px(telem.get("breakeven_hold_price"), be_fallback)
+
+    def _pct_val(val: Any, fallback: float) -> float:
+        try:
+            v = float(val)
+            return v if math.isfinite(v) else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    p10_pct = _pct_val(m.get("p10_close_pct"), -4.6)
+    p25_pct = _pct_val(m.get("p25_close_pct"), -1.9)
+    p75_pct = _pct_val(m.get("p75_close_pct"), 2.9)
+    p90_pct = _pct_val(m.get("p90_close_pct"), 5.8)
+
+    p10_px = spot * (1.0 + p10_pct / 100.0)
+    p25_px = spot * (1.0 + p25_pct / 100.0)
+    p75_px = spot * (1.0 + p75_pct / 100.0)
+    p90_px = spot * (1.0 + p90_pct / 100.0)
+    p10_px, p25_px, p75_px, p90_px = sorted([max(0.5, p10_px), max(0.5, p25_px), max(0.5, p75_px), max(0.5, p90_px)])
+
+    pw_k = _safe_px(gw.get("put_wall_strike"), 0.0)
+    cw_k = _safe_px(gw.get("call_wall_strike"), 0.0)
+    gflip_k = _safe_px(gw.get("gamma_flip_strike"), 0.0)
+
+    core_xs = [spot, vwma20, stp_p, strike_k, be_px, tgt_p, p10_px, p90_px]
+    max_wall_dist = 0.22 * spot
+    walls_in_window: List[Tuple[str, float, str, str]] = []
+    for lbl_w, px_w, col_w, sym_w in (
+        ("Put Wall", pw_k, "#F43F5E", "triangle-down"),
+        ("Gamma Flip", gflip_k, "#FF6B00", "hexagram"),
+        ("Call Wall", cw_k, "#10B981", "triangle-up"),
+    ):
+        if px_w > 0.0 and abs(px_w - spot) <= max_wall_dist:
+            walls_in_window.append((lbl_w, px_w, col_w, sym_w))
+            core_xs.append(px_w)
+
+    x_min = min(core_xs)
+    x_max = max(core_xs)
+    span = max(spot * 0.05, x_max - x_min)
+    x_lo = max(0.1, x_min - span * 0.20)
+    x_hi = x_max + span * 0.20
+
+    fig = go.Figure()
+
+    # Shaded 5Y Empirical Probability Corridor (P10-P90 outer & P25-P75 core)
+    fig.add_vrect(
+        x0=p10_px,
+        x1=p90_px,
+        fillcolor="rgba(56, 189, 248, 0.07)",
+        line=dict(color="rgba(56, 189, 248, 0.24)", width=1, dash="dot"),
+        layer="below",
+    )
+    fig.add_vrect(
+        x0=p25_px,
+        x1=p75_px,
+        fillcolor="rgba(56, 189, 248, 0.17)",
+        line=dict(color="rgba(56, 189, 248, 0.42)", width=1),
+        layer="below",
+    )
+
+    # Bottom probability band line showing P10 / P25 / Spot / P75 / P90 on hover
+    fig.add_trace(
+        go.Scatter(
+            x=[p10_px, p25_px, spot, p75_px, p90_px],
+            y=[0.07, 0.07, 0.07, 0.07, 0.07],
+            mode="lines+markers",
+            line=dict(color="rgba(56, 189, 248, 0.55)", width=2),
+            marker=dict(size=5, color="#38BDF8"),
+            name="5Y Empirical P10–P90",
+            text=["P10 Tail", "P25 Core", "Spot", "P75 Core", "P90 Tail"],
+            hovertemplate=(
+                "<b>%{text}</b>: $%{x:.2f}<br>"
+                f"P25–P75 Core: ${p25_px:.2f} – ${p75_px:.2f}<br>"
+                f"P10–P90 Tail: ${p10_px:.2f} – ${p90_px:.2f}<extra></extra>"
+            ),
+        )
+    )
+
+    # Baseline track for setup nodes
+    fig.add_shape(
+        type="line",
+        x0=x_lo,
+        x1=x_hi,
+        y0=0.58,
+        y1=0.58,
+        line=dict(color="rgba(255, 255, 255, 0.10)", width=1.4),
+    )
+
+    setup_nodes = [
+        ("Stop", stp_p, "#FB7185", "x", "dash"),
+        ("VWMA", vwma20, "#38BDF8", "circle", "dot"),
+        ("Spot", spot, "#F8FAFC", "diamond", "solid"),
+        ("Strike", strike_k, "#A78BFA", "square", "dot"),
+        ("BE", be_px, "#FBBF24", "triangle-right", "dot"),
+        ("Target", tgt_p, "#34D399", "star", "dash"),
+    ]
+    setup_nodes.sort(key=lambda item: item[1])
+    y_lanes = [0.70, 0.52, 0.83, 0.35]
+    lane_last_x: Dict[float, float] = {}
+    min_label_gap = 0.28 * (x_hi - x_lo)
+    y_offsets: List[float] = []
+    for _, n_px, _, _, _ in setup_nodes:
+        chosen_y: Optional[float] = None
+        for cand_y in y_lanes:
+            last_x = lane_last_x.get(cand_y)
+            if last_x is None or abs(n_px - last_x) >= min_label_gap:
+                chosen_y = cand_y
+                break
+        if chosen_y is None:
+            chosen_y = max(y_lanes, key=lambda ly: abs(n_px - lane_last_x.get(ly, -1e9)))
+        lane_last_x[chosen_y] = n_px
+        y_offsets.append(chosen_y)
+
+    for (n_lbl, n_px, n_col, n_sym, n_dash), y_pos in zip(setup_nodes, y_offsets):
+        pct_diff = ((n_px - spot) / spot) * 100.0
+        fig.add_shape(
+            type="line",
+            x0=n_px,
+            x1=n_px,
+            y0=0.12,
+            y1=y_pos,
+            line=dict(color=n_col, width=1.1, dash=n_dash),
+            opacity=0.55,
+        )
+        # Keep edge labels pointed inward so nothing clips off-canvas on 390px viewports
+        rel_x = (n_px - x_lo) / max(0.01, (x_hi - x_lo))
+        if rel_x < 0.14:
+            t_pos = "top right" if y_pos >= 0.60 else "bottom right"
+        elif rel_x > 0.86:
+            t_pos = "top left" if y_pos >= 0.60 else "bottom left"
+        else:
+            t_pos = "top center" if y_pos >= 0.60 else "bottom center"
+
+        fig.add_trace(
+            go.Scatter(
+                x=[n_px],
+                y=[y_pos],
+                mode="markers+text",
+                marker=dict(size=11 if n_lbl in ("Spot", "Target") else 9, color=n_col, symbol=n_sym, line=dict(color="#06070A", width=1.1)),
+                text=[f"{n_lbl} ${n_px:.2f}"],
+                textposition=t_pos,
+                textfont=dict(size=9.0, color=n_col, family="JetBrains Mono, Plus Jakarta Sans"),
+                name=n_lbl,
+                showlegend=False,
+                hovertemplate=f"<b>{n_lbl}</b><br>Price: <b>$%{{x:.2f}}</b> ({pct_diff:+.2f}% vs Spot)<extra></extra>",
+            )
+        )
+
+    # Dealer Walls lane (y = 0.21) with inward edge alignment
+    wall_short_map = {"Put Wall": "Put Wall", "Gamma Flip": "γ-Flip", "Call Wall": "Call Wall"}
+    for w_lbl, w_px, w_col, w_sym in walls_in_window:
+        w_diff = ((w_px - spot) / spot) * 100.0
+        rel_wx = (w_px - x_lo) / max(0.01, (x_hi - x_lo))
+        w_tpos = "top right" if rel_wx < 0.18 else ("top left" if rel_wx > 0.82 else "top center")
+        fig.add_trace(
+            go.Scatter(
+                x=[w_px],
+                y=[0.21],
+                mode="markers+text",
+                marker=dict(size=9.5, color=w_col, symbol=w_sym, line=dict(color="#06070A", width=1)),
+                text=[f"{wall_short_map.get(w_lbl, w_lbl)} ${w_px:g}"],
+                textposition=w_tpos,
+                textfont=dict(size=8.8, color=w_col, family="JetBrains Mono"),
+                name=w_lbl,
+                showlegend=False,
+                hovertemplate=f"<b>{w_lbl}</b>: $%{{x:.2f}} ({w_diff:+.2f}% vs Spot)<extra></extra>",
+            )
+        )
+
+    # Clean two-line wrapped header annotation so 390px screens never clip text horizontally
+    fig.add_annotation(
+        x=0.01,
+        y=1.00,
+        xref="paper",
+        yref="paper",
+        text=(
+            f"<b>{sym} Trade Anatomy &amp; 5Y Corridor</b><br>"
+            f"<span style='font-size:9.5px;color:#38BDF8;'>P25–P75 Core: ${p25_px:.2f}–${p75_px:.2f}</span>  "
+            f"<span style='font-size:9.5px;color:#94A3B8;'>(P10–P90: ${p10_px:.2f}–${p90_px:.2f})</span>"
+        ),
+        align="left",
+        showarrow=False,
+        xanchor="left",
+        yanchor="top",
+        font=dict(size=10.5, color="#E2E8F0", family="Plus Jakarta Sans"),
+    )
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(10, 13, 20, 0.52)",
+        height=max(230, int(height)),
+        autosize=True,
+        margin=dict(l=12, r=12, t=42, b=28),
+        showlegend=False,
+        xaxis=dict(
+            range=[x_lo, x_hi],
+            showgrid=True,
+            gridcolor="rgba(255, 255, 255, 0.05)",
+            zeroline=False,
+            tickprefix="$",
+            tickfont=dict(color="#CBD5E1", size=10.0, family="JetBrains Mono"),
+        ),
+        yaxis=dict(
+            range=[0.0, 1.15],
+            showgrid=False,
+            showticklabels=False,
+            zeroline=False,
+            fixedrange=True,
+        ),
+        hoverlabel=dict(
+            bgcolor="rgba(10, 12, 18, 0.96)",
+            bordercolor="rgba(56, 189, 248, 0.45)",
+            font=dict(family="Plus Jakarta Sans, sans-serif", size=11.5, color="#E2E8F0"),
+        ),
+    )
+    return fig
 
