@@ -8,7 +8,7 @@ import os
 import sys
 from datetime import datetime
 from dotenv import load_dotenv
-import rubberband_engine as re
+import rubberband_engine as rbe_eng
 import rubberband_arbiter as rba
 
 if sys.stdout.encoding.lower() != 'utf-8':
@@ -32,14 +32,14 @@ def run_scan(z_threshold: float = 1.65, log_to_file: bool = True):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting Rubberband v3.5 Scanner...")
 
     # Pre-warm batch quotes
-    re.fmp_batch_quotes(WATCHLIST + ["SMH", "BOTZ", "URA", "XLU"])
+    rbe_eng.fmp_batch_quotes(WATCHLIST + ["SMH", "BOTZ", "URA", "XLU"])
     qualifying_candidates = []
 
     for ticker in WATCHLIST:
         sys.stdout.write(f"Analyzing {ticker}...")
         sys.stdout.flush()
 
-        dd = re.get_due_diligence_candidate(ticker, benchmark_symbol=BENCHMARK)
+        dd = rbe_eng.get_due_diligence_candidate(ticker, benchmark_symbol=BENCHMARK)
         if not dd:
             print(" [No Data]")
             continue
@@ -47,7 +47,7 @@ def run_scan(z_threshold: float = 1.65, log_to_file: bool = True):
         metrics = dd["metrics"]
         fund = dd["fundamentals"]
         bp = dd["blueprint"]
-        news = re.get_recent_news(ticker, limit=3)
+        news = rbe_eng.get_recent_news(ticker, limit=3)
 
         entry = {
             "ticker": ticker,
@@ -61,7 +61,12 @@ def run_scan(z_threshold: float = 1.65, log_to_file: bool = True):
         z = metrics["z_score_5d"]
         conv_200 = int(bp.get("conviction_score_200", metrics.get("conviction_score_200", 0)) or 0)
         rec_dte = int(bp.get("recommended_dte", metrics.get("recommended_dte", 30)) or 30)
-        is_trig = (abs(z) >= z_threshold or "COILED" in metrics["state"]) and metrics["action"] in ["BUY CALL", "BUY PUT"]
+        is_trig = (
+            not metrics.get("is_bad_data", False)
+            and int(metrics.get("days_to_earnings", 45) or 45) > 15
+            and (abs(z) >= z_threshold or "COILED" in metrics["state"])
+            and metrics["action"] in ["BUY CALL", "BUY PUT"]
+        )
         status = "[TRIGGER]" if is_trig else "[NORMAL]"
         print(
             f" Eff Z: {z:+.2f}σ (Abs: {metrics['z_abs']:+.2f}σ) | Half-Life: {metrics['ou_half_life']:.1f}d | "
@@ -106,8 +111,9 @@ def run_scan(z_threshold: float = 1.65, log_to_file: bool = True):
         output_lines.append("\n---\n")
 
     if log_to_file:
-        os.makedirs("signals", exist_ok=True)
-        file_path = os.path.join("signals", "today.md")
+        sig_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signals")
+        os.makedirs(sig_dir, exist_ok=True)
+        file_path = os.path.join(sig_dir, "today.md")
         with open(file_path, "w", encoding="utf-8") as f:
             f.write("\n".join(output_lines))
         print(f"\n✅ Signals successfully logged to: {os.path.abspath(file_path)}")

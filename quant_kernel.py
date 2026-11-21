@@ -54,47 +54,82 @@ def black_scholes_all_greeks(
     Computes exact first- and second-order analytical Black-Scholes-Merton Greeks:
     - price, delta, gamma, theta (per calendar day), vega (per 1% IV move)
     - vanna: dDelta / dSigma (per 1% IV change) — critical for post-event / vol-crush dealer flows
-    - charm: -dDelta / dt (delta bleed per calendar day) — critical for Thu/Fri OPEX pinning
+    - charm: +dDelta / dt = -dDelta / dTau (delta change per calendar day elapsed) — critical for Thu/Fri OPEX pinning
     """
-    s = max(1e-4, float(spot))
-    k = max(1e-4, float(strike))
-    t = max(1.0 / 365.0, float(t_years))
-    vol = max(0.05, min(3.50, float(sigma)))
+    try:
+        s_in = float(spot)
+        k_in = float(strike)
+        t_in = float(t_years)
+        r_in = float(r)
+        vol_in = float(sigma)
+        q_in = float(q or 0.0)
+    except (TypeError, ValueError):
+        return {
+            "valid": False, "price": 0.0, "delta": 0.0, "gamma": 0.0,
+            "theta_daily": 0.0, "vega_pct": 0.0, "vanna_pct": 0.0, "charm_daily": 0.0,
+        }
+
+    if not (
+        math.isfinite(s_in) and math.isfinite(k_in) and math.isfinite(t_in)
+        and math.isfinite(r_in) and math.isfinite(vol_in) and math.isfinite(q_in)
+    ) or s_in <= 0.0 or k_in <= 0.0:
+        return {
+            "valid": False, "price": 0.0, "delta": 0.0, "gamma": 0.0,
+            "theta_daily": 0.0, "vega_pct": 0.0, "vanna_pct": 0.0, "charm_daily": 0.0,
+        }
+
+    if t_in <= 1e-6:
+        intrinsic_exp = max(0.0, (s_in - k_in) if is_call else (k_in - s_in))
+        if is_call:
+            delta_exp = 1.0 if s_in > k_in else (0.5 if abs(s_in - k_in) <= 1e-9 else 0.0)
+        else:
+            delta_exp = -1.0 if s_in < k_in else (-0.5 if abs(s_in - k_in) <= 1e-9 else 0.0)
+        return {
+            "valid": True, "price": intrinsic_exp, "delta": delta_exp, "gamma": 0.0,
+            "theta_daily": 0.0, "vega_pct": 0.0, "vanna_pct": 0.0, "charm_daily": 0.0,
+        }
+
+    s = s_in
+    k = k_in
+    t = t_in
+    vol = max(0.05, min(3.50, vol_in))
     sqrt_t = math.sqrt(t)
     vol_sqrt_t = vol * sqrt_t
 
-    d1 = (math.log(s / k) + (r - q + 0.5 * vol * vol) * t) / vol_sqrt_t
+    d1 = (math.log(s / k) + (r_in - q_in + 0.5 * vol * vol) * t) / vol_sqrt_t
     d2 = d1 - vol_sqrt_t
 
     nd1 = _norm_pdf(d1)
-    disc_q = math.exp(-q * t)
-    disc_r = math.exp(-r * t)
+    disc_q = math.exp(-q_in * t)
+    disc_r = math.exp(-r_in * t)
 
     if is_call:
         nd1_cdf = _norm_cdf(d1)
         nd2_cdf = _norm_cdf(d2)
         price = s * disc_q * nd1_cdf - k * disc_r * nd2_cdf
+        euro_floor = max(0.0, s * disc_q - k * disc_r)
         delta = disc_q * nd1_cdf
         theta_yr = (
             -(s * disc_q * nd1 * vol) / (2.0 * sqrt_t)
-            - r * k * disc_r * nd2_cdf
-            + q * s * disc_q * nd1_cdf
+            - r_in * k * disc_r * nd2_cdf
+            + q_in * s * disc_q * nd1_cdf
         )
-        charm_yr = q * disc_q * nd1_cdf - disc_q * nd1 * (
-            2.0 * (r - q) * t - d2 * vol_sqrt_t
+        charm_yr = q_in * disc_q * nd1_cdf - disc_q * nd1 * (
+            2.0 * (r_in - q_in) * t - d2 * vol_sqrt_t
         ) / (2.0 * t * vol_sqrt_t)
     else:
         n_neg_d1 = _norm_cdf(-d1)
         n_neg_d2 = _norm_cdf(-d2)
         price = k * disc_r * n_neg_d2 - s * disc_q * n_neg_d1
+        euro_floor = max(0.0, k * disc_r - s * disc_q)
         delta = -disc_q * n_neg_d1
         theta_yr = (
             -(s * disc_q * nd1 * vol) / (2.0 * sqrt_t)
-            + r * k * disc_r * n_neg_d2
-            - q * s * disc_q * n_neg_d1
+            + r_in * k * disc_r * n_neg_d2
+            - q_in * s * disc_q * n_neg_d1
         )
-        charm_yr = -q * disc_q * n_neg_d1 - disc_q * nd1 * (
-            2.0 * (r - q) * t - d2 * vol_sqrt_t
+        charm_yr = -q_in * disc_q * n_neg_d1 - disc_q * nd1 * (
+            2.0 * (r_in - q_in) * t - d2 * vol_sqrt_t
         ) / (2.0 * t * vol_sqrt_t)
 
     gamma = (disc_q * nd1) / (s * vol_sqrt_t)
@@ -102,9 +137,9 @@ def black_scholes_all_greeks(
     # Vanna = dDelta / dVol = -disc_q * pdf(d1) * d2 / vol
     vanna_raw = -disc_q * nd1 * (d2 / vol)
 
-    intrinsic = max(0.0, (s - k) if is_call else (k - s))
     return {
-        "price": max(intrinsic, price),
+        "valid": True,
+        "price": max(euro_floor, price),
         "delta": delta,
         "gamma": gamma,
         "theta_daily": theta_yr / 365.0,
@@ -137,21 +172,36 @@ def american_crr_price_and_greeks(
 
     q_clean = max(0.0, min(0.25, float(q or 0.0)))
     bs = black_scholes_all_greeks(spot, strike, t_years, r, sigma, is_call=is_call, q=q_clean)
+    if not bs.get("valid", True) or float(t_years) <= 1e-6:
+        bs["early_exercise_premium"] = 0.0
+        return bs
+
     # By Merton's theorem, an American Call without dividends equals the European Call
     if is_call and q_clean <= 1e-4:
         bs["early_exercise_premium"] = 0.0
         return bs
 
-    s = max(1e-4, float(spot))
-    k = max(1e-4, float(strike))
-    t = max(1.0 / 365.0, float(t_years))
+    s = float(spot)
+    k = float(strike)
+    t = float(t_years)
     vol = max(0.05, min(3.50, float(sigma)))
     n = max(16, int(steps))
+
+    # Ensure risk-neutral probability p stays strictly inside (0, 1) without arbitrage clipping
+    while n < 200:
+        dt_test = t / n
+        u_test = math.exp(vol * math.sqrt(dt_test))
+        d_test = 1.0 / u_test
+        p_test = (math.exp((r - q_clean) * dt_test) - d_test) / max(1e-12, u_test - d_test)
+        if 0.005 < p_test < 0.995:
+            break
+        n = min(200, max(n + 16, int(n * 1.5)))
+
     dt = t / n
     u = math.exp(vol * math.sqrt(dt))
     d = 1.0 / u
     disc = math.exp(-r * dt)
-    p = (math.exp((r - q_clean) * dt) - d) / max(1e-9, u - d)
+    p = (math.exp((r - q_clean) * dt) - d) / max(1e-12, u - d)
     p = min(0.999, max(0.001, p))
     q_prob = 1.0 - p
 
@@ -191,9 +241,9 @@ def american_crr_price_and_greeks(
             delta_up = (v_uu - v_ud) / max(1e-6, s * u * u - s)
             delta_dn = (v_ud - v_dd) / max(1e-6, s - s * d * d)
             tree_gamma = (delta_up - delta_dn) / max(1e-6, 0.5 * (s * u * u - s * d * d))
-            tree_theta_daily = ((v_ud - bs["price"]) / max(1e-6, 2.0 * dt)) / 365.0
+            tree_theta_daily = ((v_ud - am_price) / max(1e-6, 2.0 * dt)) / 365.0
             bs["gamma"] = max(0.0, float(tree_gamma))
-            bs["theta_daily"] = float(tree_theta_daily)
+            bs["theta_daily"] = float(min(0.0, tree_theta_daily) if (not is_call and am_price <= (k - s + 1e-4)) else tree_theta_daily)
 
     bs["early_exercise_premium"] = round(early_prem, 4)
     return bs
@@ -281,7 +331,7 @@ def fit_svi_volatility_smile(
     wt_sum = float(np.sum(wt))
     wt = wt / (wt_sum if wt_sum > 0 else 1.0)
 
-    k_test = np.linspace(-0.35, 0.35, 15)
+    k_test = np.linspace(-0.50, 0.50, 41)
     w_bar = float(np.sum(wt * w_obs))
 
     def _fit_ab_and_loss(rho_val: float, m_val: float, sig_val: float) -> Tuple[float, float, float]:
@@ -342,8 +392,42 @@ def fit_svi_volatility_smile(
     g_final = _svi_min_butterfly_g(k_test, a_opt, b_opt, rho_opt, m_opt, sig_opt)
 
     atm_w = max(1e-5, float(_svi_eval(np.array([0.0]), a_opt, b_opt, rho_opt, m_opt, sig_opt)[0]))
-    p25_w = max(1e-5, float(_svi_eval(np.array([-0.10]), a_opt, b_opt, rho_opt, m_opt, sig_opt)[0]))
-    c25_w = max(1e-5, float(_svi_eval(np.array([0.10]), a_opt, b_opt, rho_opt, m_opt, sig_opt)[0]))
+
+    def _svi_iv_at_k(k_val: float) -> float:
+        w_val = max(1e-5, float(_svi_eval(np.array([k_val]), a_opt, b_opt, rho_opt, m_opt, sig_opt)[0]))
+        return max(0.03, min(3.50, math.sqrt(w_val / t)))
+
+    def _solve_25d_k(is_call_side: bool) -> float:
+        # Bisect log-moneyness k = ln(K/F) where BSM forward delta == +0.25 (call) or -0.25 (put)
+        target_abs_delta = 0.25
+        lo_k, hi_k = (0.0, 1.2) if is_call_side else (-1.2, 0.0)
+        for _ in range(14):
+            mid_k = 0.5 * (lo_k + hi_k)
+            iv_m = _svi_iv_at_k(mid_k)
+            v_st = iv_m * math.sqrt(t)
+            d1_m = (-mid_k + 0.5 * iv_m * iv_m * t) / max(1e-6, v_st)
+            abs_delta = math.exp(-q * t) * (_norm_cdf(d1_m) if is_call_side else _norm_cdf(-d1_m))
+            if is_call_side:
+                if abs_delta > target_abs_delta:
+                    lo_k = mid_k
+                else:
+                    hi_k = mid_k
+            else:
+                if abs_delta > target_abs_delta:
+                    hi_k = mid_k
+                else:
+                    lo_k = mid_k
+        return 0.5 * (lo_k + hi_k)
+
+    k_p25 = _solve_25d_k(is_call_side=False)
+    k_c25 = _solve_25d_k(is_call_side=True)
+    p25_iv = _svi_iv_at_k(k_p25)
+    c25_iv = _svi_iv_at_k(k_c25)
+
+    # Full-length fitted_ivs aligned with input strikes array
+    k_full = np.log(np.maximum(1e-2, np.where(np.isfinite(s_raw) & (s_raw > 0), s_raw, fwd)) / max(1e-2, fwd))
+    w_full = np.maximum(1e-5, _svi_eval(k_full, a_opt, b_opt, rho_opt, m_opt, sig_opt))
+    iv_full_fit = np.sqrt(w_full / t)
 
     # Residuals in vol points: negative residual = market IV trades cheaper than calibrated SVI surface
     residuals = (iv_clean - iv_fit) * 100.0
@@ -371,8 +455,8 @@ def fit_svi_volatility_smile(
 
     return {
         "atm_iv": round(float(math.sqrt(atm_w / t)), 4),
-        "put_25d_iv": round(float(math.sqrt(p25_w / t)), 4),
-        "call_25d_iv": round(float(math.sqrt(c25_w / t)), 4),
+        "put_25d_iv": round(float(p25_iv), 4),
+        "call_25d_iv": round(float(c25_iv), 4),
         "svi_rho": round(float(rho_opt), 3),
         "svi_vol_of_vol": round(float(b_opt), 4),
         "svi_params": {
@@ -383,8 +467,8 @@ def fit_svi_volatility_smile(
             "sigma": round(float(sig_opt), 4),
         },
         "svi_rmse_vol_pts": round(rmse_vol, 2),
-        "butterfly_arbitrage_free": bool(g_final >= -1e-3),
-        "fitted_ivs": [round(float(x), 4) for x in iv_fit],
+        "butterfly_arbitrage_free": bool(g_final >= -1e-6),
+        "fitted_ivs": [round(float(x), 4) for x in iv_full_fit],
         "cheapest_strike": float(s_arr[cheap_idx]),
         "cheapest_iv_discount_pct": round(float(residuals[cheap_idx]), 2),
         "cheapest_call_strike": cheapest_call_strike,
@@ -414,11 +498,16 @@ def kalman_dynamic_beta_and_z(
         return {"kalman_beta": 1.15, "kalman_alpha_ann": 0.0, "kalman_z_5d": 0.0, "idio_vol_ann": 0.35}
 
     n = min(len(stock_closes), len(bench_closes))
-    s_c = np.asarray(stock_closes[-n:], dtype=np.float64)
-    b_c = np.asarray(bench_closes[-n:], dtype=np.float64)
+    s_raw = np.asarray(stock_closes[-n:], dtype=np.float64)
+    b_raw = np.asarray(bench_closes[-n:], dtype=np.float64)
+    valid = np.isfinite(s_raw) & np.isfinite(b_raw) & (s_raw > 0.0) & (b_raw > 0.0)
+    s_c = s_raw[valid]
+    b_c = b_raw[valid]
+    if len(s_c) < 25:
+        return {"kalman_beta": 1.15, "kalman_alpha_ann": 0.0, "kalman_z_5d": 0.0, "idio_vol_ann": 0.35}
 
-    r_s = np.diff(np.log(np.maximum(1e-4, s_c)))
-    r_b = np.diff(np.log(np.maximum(1e-4, b_c)))
+    r_s = np.diff(np.log(s_c))
+    r_b = np.diff(np.log(b_c))
 
     theta = np.array([0.0, 1.15], dtype=np.float64)
     p_mat = np.diag([1e-4, 0.25])
@@ -444,17 +533,20 @@ def kalman_dynamic_beta_and_z(
         theta = theta + k_gain * err
         theta[0] = float(np.clip(theta[0], -0.015, 0.015))
         theta[1] = float(np.clip(theta[1], 0.15, 3.80))
-        p_mat = p_pred - np.outer(k_gain, ph)
+        # Joseph stabilized covariance update guarantees symmetry and PSD
+        i_kh = np.eye(2) - np.outer(k_gain, h_vec)
+        p_mat = i_kh @ p_pred @ i_kh.T + r_ewma * np.outer(k_gain, k_gain)
 
-    # Demeaned 5-day cumulative Kalman idiosyncratic residual Z-score
+    # Demeaned 5-day cumulative Kalman idiosyncratic residual Z-score (strictly excluding current 5D sum)
     if len(residuals) >= 20:
         recent_res = residuals[-65:] if len(residuals) >= 65 else residuals
         rolling_5d = np.convolve(recent_res, np.ones(5), mode="valid")
-        mean_5d = float(np.mean(rolling_5d)) if len(rolling_5d) > 3 else 0.0
-        std_5d = float(np.std(rolling_5d)) if len(rolling_5d) > 3 else 0.03
+        hist_5d = rolling_5d[:-1] if len(rolling_5d) > 4 else rolling_5d
+        mean_5d = float(np.mean(hist_5d)) if len(hist_5d) > 3 else 0.0
+        std_5d = float(np.std(hist_5d, ddof=1)) if len(hist_5d) > 3 else 0.03
         cum_5d_now = float(np.sum(residuals[-5:]))
         kalman_z = (cum_5d_now - mean_5d) / max(0.008, std_5d)
-        idio_vol = float(np.std(residuals[-30:]) * math.sqrt(252.0))
+        idio_vol = float(np.std(residuals[-30:], ddof=1) * math.sqrt(252.0))
     else:
         kalman_z = 0.0
         idio_vol = 0.35
@@ -470,11 +562,12 @@ def kalman_dynamic_beta_and_z(
 def compute_dealer_vanna_charm_profile(
     chain_df: pd.DataFrame,
     spot: float,
-    r: float = 0.0425
+    r: float = 0.0425,
+    q: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Computes aggregate Dealer Second-Order Exposure across an OPRA Option Chain:
-    - Net GEX ($ millions per 1% spot move) & Gamma Flip Strike
+    - Net GEX ($ millions per 1% spot move) & Gamma Flip Strike (zero-crossing of NetGEX(S*))
     - Net Vanna ($ millions dealer share re-hedge per 1-point IV drop)
     - Net Charm ($ millions overnight delta bleed per day)
     - Strike-by-strike GEX profile for shared-axis price chart overlay.
@@ -495,6 +588,7 @@ def compute_dealer_vanna_charm_profile(
     net_vanna_dollars = 0.0
     net_charm_dollars = 0.0
     strike_gex_map: Dict[float, float] = {}
+    contracts: List[Tuple[float, float, float, float, float]] = []
 
     for _, row in chain_df.iterrows():
         k = float(row.get("strike", 0.0) or 0.0)
@@ -507,13 +601,20 @@ def compute_dealer_vanna_charm_profile(
 
         side = str(row.get("side", "call")).lower()
         is_call = (side == "call")
-        dte = max(1, int(row.get("dte", 35) or 35))
-        iv = float(row.get("impliedVolatility", 0.40) or 0.40)
+        dte_raw = row.get("dte")
+        if dte_raw is not None and not pd.isna(dte_raw):
+            dte_int = int(dte_raw)
+        else:
+            dte_int = 35
+        t_years = (0.25 / 365.0) if dte_int <= 0 else (dte_int / 365.0)
+
+        iv_raw = row.get("impliedVolatility")
+        iv = float(iv_raw) if (iv_raw is not None and not pd.isna(iv_raw) and float(iv_raw) > 0) else 0.40
         if iv > 3.5:
             iv = iv / 100.0
         iv = max(0.08, min(2.80, iv))
 
-        g_reeks = black_scholes_all_greeks(spot, k, dte / 365.0, r, iv, is_call=is_call)
+        g_reeks = black_scholes_all_greeks(spot, k, t_years, r, iv, is_call=is_call, q=q)
         sign = 1.0 if is_call else -1.0
 
         # Dollar Gamma for 1% move in Spot: Gamma * (0.01 * Spot) * 100 * OI * Spot
@@ -528,6 +629,7 @@ def compute_dealer_vanna_charm_profile(
         net_vanna_dollars += vanna_k
         net_charm_dollars += charm_k
         strike_gex_map[k] = strike_gex_map.get(k, 0.0) + (gex_k / 1e6)
+        contracts.append((k, float(oi), sign, t_years, iv))
 
     net_gex_m = round(net_gex_dollars / 1e6, 2)
     net_vanna_m = round(net_vanna_dollars / 1e6, 2)
@@ -555,30 +657,40 @@ def compute_dealer_vanna_charm_profile(
         key=lambda x: x["strike"]
     )
 
-    # Identify Gamma Flip Strike (zero-crossing of cumulative GEX / local GEX closest to spot)
+    # Solve true Gamma Flip Strike S* where aggregate NetGEX(S*) == 0 across spot grid [0.85S, 1.15S]
     gamma_flip_strike = round(float(spot), 2)
-    near_prof = [p for p in sorted_profile if abs(p["strike"] - spot) / spot <= 0.15]
-    if len(near_prof) >= 2:
-        cum_val = 0.0
-        cum_pts: List[Tuple[float, float]] = []
-        for p in near_prof:
-            cum_val += p["net_gex_m"]
-            cum_pts.append((p["strike"], p["net_gex_m"]))
+    if contracts:
+        k_vec = np.array([c[0] for c in contracts], dtype=np.float64)
+        oi_vec = np.array([c[1] for c in contracts], dtype=np.float64)
+        sgn_vec = np.array([c[2] for c in contracts], dtype=np.float64)
+        t_vec = np.array([c[3] for c in contracts], dtype=np.float64)
+        iv_vec = np.array([c[4] for c in contracts], dtype=np.float64)
+        vol_sqrt_t = iv_vec * np.sqrt(t_vec)
+        disc_q_vec = np.exp(-q * t_vec)
+
+        s_grid = np.linspace(spot * 0.85, spot * 1.15, 31)
+        gex_grid = np.zeros_like(s_grid)
+        for idx_g, s_star in enumerate(s_grid):
+            d1_vec = (np.log(s_star / k_vec) + (r - q + 0.5 * iv_vec * iv_vec) * t_vec) / vol_sqrt_t
+            nd1_vec = _INV_SQRT_2PI * np.exp(-0.5 * d1_vec * d1_vec)
+            gamma_vec = (disc_q_vec * nd1_vec) / (s_star * vol_sqrt_t)
+            gex_grid[idx_g] = float(np.sum(sgn_vec * gamma_vec * (0.01 * s_star) * 100.0 * oi_vec * s_star))
+
         crossings: List[float] = []
-        for idx in range(len(cum_pts) - 1):
-            k1, g1 = cum_pts[idx]
-            k2, g2 = cum_pts[idx + 1]
+        for idx_g in range(len(s_grid) - 1):
+            g1, g2 = float(gex_grid[idx_g]), float(gex_grid[idx_g + 1])
+            s1, s2 = float(s_grid[idx_g]), float(s_grid[idx_g + 1])
             if (g1 <= 0.0 <= g2) or (g2 <= 0.0 <= g1):
                 if abs(g2 - g1) > 1e-6:
-                    k_zero = k1 + (0.0 - g1) * (k2 - k1) / (g2 - g1)
+                    s_zero = s1 + (0.0 - g1) * (s2 - s1) / (g2 - g1)
                 else:
-                    k_zero = 0.5 * (k1 + k2)
-                crossings.append(k_zero)
+                    s_zero = 0.5 * (s1 + s2)
+                crossings.append(s_zero)
         if crossings:
             gamma_flip_strike = round(float(min(crossings, key=lambda x: abs(x - spot))), 2)
         else:
-            min_abs_pt = min(near_prof, key=lambda x: abs(x["net_gex_m"]))
-            gamma_flip_strike = round(float(min_abs_pt["strike"]), 2)
+            min_idx = int(np.argmin(np.abs(gex_grid)))
+            gamma_flip_strike = round(float(s_grid[min_idx]), 2)
 
     return {
         "net_gex_m": net_gex_m,
@@ -638,9 +750,9 @@ def compute_institutional_ev_and_kelly(
     # Variance Risk Premium (IV - HV20 in vol points)
     vrp_pts = round((iv - hv20) * 100.0, 1)
 
-    # Daily Variance Rent Ratio: E[0.5 * Gamma * S^2 * (daily_hv)^2] / |Theta_daily|
+    # Daily Variance Rent Ratio (calendar-day consistent): E[0.5 * Gamma * S^2 * (hv / sqrt(365))^2] / |Theta_daily|
     g_entry = american_crr_price_and_greeks(spot, strike, dte / 365.0, r_clean, iv, is_call=is_call, steps=30, q=q_clean)
-    daily_gamma_rent = 0.5 * abs(g_entry["gamma"]) * (spot ** 2) * ((hv20 / math.sqrt(252.0)) ** 2)
+    daily_gamma_rent = 0.5 * abs(g_entry["gamma"]) * (spot ** 2) * ((hv20 / math.sqrt(365.0)) ** 2)
     daily_theta_bill = max(0.005, abs(g_entry["theta_daily"]))
     variance_rent_ratio = round(daily_gamma_rent / daily_theta_bill, 2)
 
@@ -650,33 +762,27 @@ def compute_institutional_ev_and_kelly(
     n_eff = max(6, int(metrics.get("empirical_sample_n_eff", max(8, int(round(n_obs * 0.45)))) or 8))
     p_win = (n_eff * p_win_raw + 8.0 * 0.50) / (n_eff + 8.0)
 
-    # Build 5-quantile underlying 5D return distribution oriented toward setup direction
+    # Build 5-quantile underlying 5D close return distribution without forced favorable clamping or PUT sign corruption
     ou_hl = max(1.5, float(metrics.get("ou_half_life", metrics.get("tau_half_life", 4.5)) or 4.5))
-    pace_factor = min(1.0, max(0.55, 1.0 - math.exp(-5.0 / ou_hl)))
-    exp_basis_pct = float(metrics.get("expected_basis_pct", 3.0) or 3.0)
+    pace_factor = min(1.0, max(0.35, 1.0 - (2.0 ** (-5.0 / ou_hl))))
+    exp_basis_pct = float(metrics.get("expected_basis_pct", 0.0) or 0.0)
     mfe_up = abs(float(metrics.get("expected_up_basis_pct", 4.0) or 4.0))
     mae_dn = abs(float(metrics.get("expected_down_basis_pct", -2.8) or -2.8))
 
-    # Extract empirical return quantiles if computed by engine, otherwise construct smooth skew distribution
+    # Read empirical close quantiles (p50_close_pct preferred, falling back to med_close_pct)
     q10_emp = float(metrics.get("p10_close_pct", -(mae_dn * 1.45)))
     q25_emp = float(metrics.get("p25_close_pct", -(mae_dn * 0.72)))
-    q50_emp = float(metrics.get("p50_close_pct", exp_basis_pct * 0.65 if is_call else -abs(exp_basis_pct) * 0.65))
+    q50_default = (exp_basis_pct * 0.65) if is_call else (-abs(exp_basis_pct) * 0.65)
+    q50_emp = float(metrics.get("p50_close_pct", metrics.get("med_close_pct", q50_default)))
     q75_emp = float(metrics.get("p75_close_pct", max(mfe_up * 0.85, abs(exp_basis_pct) * 1.05)))
     q90_emp = float(metrics.get("p90_close_pct", max(mfe_up * 1.45, abs(exp_basis_pct) * 1.75)))
 
-    if is_call:
-        raw_moves = [q10_emp, q25_emp, max(q50_emp * pace_factor, 0.3), q75_emp * (0.75 + 0.25 * pace_factor), q90_emp]
-        if mfe_up > 0 and raw_moves[3] < 0:
-            raw_moves = [-mae_dn * 1.35, -mae_dn * 0.65, exp_basis_pct * 0.55, mfe_up * 0.90, mfe_up * 1.45]
-    else:
-        raw_moves = [q90_emp if q90_emp > 0 else mae_dn * 1.35, q75_emp if q75_emp > 0 else mae_dn * 0.65,
-                     min(q50_emp * pace_factor, -0.3), -max(abs(q25_emp), mfe_up * 0.70), -max(abs(q10_emp), mfe_up * 1.25)]
-        if mae_dn > 0 and q90_emp <= 0 and q10_emp >= 0:
-            raw_moves = [mfe_up * 1.25, mfe_up * 0.55, -abs(exp_basis_pct) * 0.55, -mae_dn * 0.95, -mae_dn * 1.45]
+    raw_moves = sorted([q10_emp, q25_emp, q50_emp * (0.70 + 0.30 * pace_factor), q75_emp, q90_emp])
 
     q_weights = [0.15, 0.20, 0.30, 0.20, 0.15]
     t_rem = max(2, dte - 5) / 365.0
     entry_fill = mid + 0.25 * spread_dollars
+    basis_mult = float(np.clip(mid / max(0.05, g_entry["price"]), 0.75, 1.35))
 
     rois: List[float] = []
     for pct_mv in raw_moves:
@@ -684,16 +790,16 @@ def compute_institutional_ev_and_kelly(
         # Spot-Vol negative leverage beta (-0.40) + 5-day VRP mean reversion (-0.18)
         iv_q = max(0.08, min(2.50, iv - 0.40 * (pct_mv / 100.0) * iv - 0.18 * (iv - hv20)))
         g_q = american_crr_price_and_greeks(spot_q, strike, t_rem, r_clean, iv_q, is_call=is_call, q=q_clean)
-        exit_q = max(0.01, g_q["price"] - 0.25 * spread_dollars)
+        exit_q = max(0.01, (g_q["price"] * basis_mult) - 0.25 * spread_dollars)
         roi_q = max(-0.98, (exit_q - entry_fill) / max(0.05, entry_fill))
         rois.append(roi_q)
 
-    # Upside / downside summary aligned to directional payoff quantiles
-    roi_win = max(rois[3], rois[4] * 0.85 + rois[3] * 0.15)
-    roi_loss = min(rois[0] * 0.5 + rois[1] * 0.5, rois[1])
+    # Sort ROIs ascending so roi_win is always upper payoff tail and roi_loss is lower payoff tail for both CALLs & PUTs
+    s_rois = sorted(rois)
+    roi_win = max(s_rois[3], s_rois[4] * 0.85 + s_rois[3] * 0.15)
+    roi_loss = min(s_rois[0] * 0.5 + s_rois[1] * 0.5, s_rois[1])
 
     net_ev_frac = float(sum(w * rv for w, rv in zip(q_weights, rois)))
-    # Bayesian blend slightly with win_prob when sample is meaningful
     var_roi = max(0.04, float(sum(w * ((rv - net_ev_frac) ** 2) for w, rv in zip(q_weights, rois))))
     net_ev_pct = round(net_ev_frac * 100.0, 1)
 
@@ -703,7 +809,12 @@ def compute_institutional_ev_and_kelly(
 
     kelly_dollars = round((quarter_kelly_pct / 100.0) * account_equity, 0)
     contract_cost = entry_fill * 100.0
-    kelly_contracts = max(1, int(round(kelly_dollars / max(25.0, contract_cost)))) if quarter_kelly_pct >= 0.5 else 0
+    if quarter_kelly_pct >= 0.5 and kelly_dollars >= contract_cost:
+        kelly_contracts = int(kelly_dollars // max(25.0, contract_cost))
+    elif quarter_kelly_pct >= 0.5 and contract_cost <= (kelly_dollars * 1.5):
+        kelly_contracts = 1
+    else:
+        kelly_contracts = 0
 
     # Deflated t-Statistic with honest Bernoulli std-dev (0.50), de-overlapped N_eff, and Bailey-Lopez de Prado haircut
     raw_t = ((p_win - 0.50) / 0.50) * math.sqrt(n_eff) + (net_ev_frac * 1.85)
@@ -743,6 +854,8 @@ def _pget(payload: Dict[str, Any], *keys: str, default: Any = None) -> Any:
     ):
         sub_d = payload.get(sub)
         if isinstance(sub_d, dict):
+            if sub == "skew_optimizer" and sub_d.get("has_data") is False:
+                continue
             for k in keys:
                 if k in sub_d and sub_d[k] is not None:
                     return sub_d[k]
@@ -906,7 +1019,7 @@ def compute_conviction_score_200(payload: Dict[str, Any]) -> Dict[str, Any]:
     if 0.0 < opra_iv <= 3.5:
         opra_iv *= 100.0
 
-    vrp_edge = (hv20 - opra_iv) / 12.0
+    vrp_edge = (hv20 - opra_iv) / 16.0
     skew_25d = _fget(payload, "skew_25d_pct", default=0.0)
     opt_delta = abs(_fget(payload, "delta", "estimated_delta", default=0.50))
     gamma_val = abs(_fget(payload, "gamma", default=0.0))
@@ -915,48 +1028,51 @@ def compute_conviction_score_200(payload: Dict[str, Any]) -> Dict[str, Any]:
     net_ev_pct = _fget(payload, "net_ev_pct", default=0.0)
     term_slope = _fget(payload, "term_slope_30_60_pct", default=0.0)
 
-    # Price-invariant Daily Variance Rent Ratio: (0.5 * Gamma * S^2 * daily_hv^2) / |Theta|
+    # Price-invariant Daily Variance Rent Ratio (calendar-day consistent): (0.5 * Gamma * S^2 * daily_hv^2) / |Theta|
     var_rent = _fget(payload, "variance_rent_ratio", default=0.0)
     if var_rent <= 0.0 and gamma_val > 0.0 and theta_val > 0.0:
-        daily_hv_frac = (hv20 / 100.0) / math.sqrt(252.0)
+        daily_hv_frac = (hv20 / 100.0) / math.sqrt(365.0)
         var_rent = (0.5 * gamma_val * (spot_px ** 2) * (daily_hv_frac ** 2)) / max(1e-4, theta_val)
 
     dir_axis = 1.0 if is_explicit_call else (-1.0 if is_explicit_put else math.tanh((elasticity_kalman + kinetic_asymmetry) / 25.0))
     skew_fav = math.tanh((skew_25d if dir_axis >= 0 else -skew_25d) / 6.0) * 0.65
-    # High-Delta (0.40D - 0.65D) efficiency curve peaking near 0.52D
+    # Centered High-Delta (0.40D - 0.65D) efficiency curve peaking near 0.52D (zero-centered so average contracts get ~0)
     delta_eff = math.exp(-((opt_delta - 0.52) ** 2) / (2.0 * 0.16 ** 2))
+    delta_centered = delta_eff - 0.92
 
     # Normalized Variance Rent score: > 1.0 means realized movement pays the Theta bill
     if var_rent > 0.0:
-        gt_eff = math.tanh((var_rent - 0.85) * 1.15) * 0.55
+        gt_eff = math.tanh((var_rent - 1.00) * 1.15) * 0.55
     else:
         gt_eff = 0.0
 
     # Term structure carry edge: normal contango supports 35 DTE buyers; extreme backwardation penalizes
     if term_slope > 5.0:
         term_eff = -0.38 * math.tanh((term_slope - 3.5) / 4.0)
-    elif -4.5 <= term_slope <= 1.5:
-        term_eff = 0.22
+    elif -4.5 <= term_slope <= 1.5 and term_slope != 0.0:
+        term_eff = 0.15
     else:
         term_eff = 0.0
 
-    friction_pen = max(0.0, spread_pct - 4.0) / 10.0
+    friction_pen = max(0.0, spread_pct - 6.0) / 10.0
     ev_term = math.tanh(net_ev_pct / 22.0) * 0.7
 
-    conv_mag = 0.90 * vrp_edge + skew_fav + 1.05 * delta_eff + gt_eff + term_eff + ev_term - friction_pen
+    conv_mag = 0.45 * vrp_edge + skew_fav + 0.60 * delta_centered + gt_eff + term_eff + ev_term - friction_pen
+    if not is_explicit_call and not is_explicit_put and abs(dir_axis) < 0.15:
+        conv_mag = max(0.0, conv_mag)
     surface_convexity = round(30.0 * math.tanh((dir_axis * conv_mag) / 1.45), 2)
 
     # --- PILLAR 5: regime_solvency ([-20, +20] + regime_gate_mult in [0.25, 1.12]) ---
     is_etf = bool(_pget(payload, "is_etf", default=False))
-    altman_z = _fget(payload, "altman_z", default=3.2)
-    piotroski = _fget(payload, "piotroski_score", default=6.0)
-    fund_score = _fget(payload, "fund_score", default=68.0 if is_etf else 58.0)
+    altman_z = _fget(payload, "altman_z", default=2.2)
+    piotroski = _fget(payload, "piotroski_score", default=5.0)
+    fund_score = _fget(payload, "fund_score", default=52.0)
     macro_fscore = _fget(payload, "macro_forecast_score", "forecast_score", default=0.0)
-    vix_ratio = _fget(payload, "vix_term_ratio", "vix_ratio", default=0.94)
+    vix_ratio = _fget(payload, "vix_term_ratio", "vix_ratio", default=0.95)
     days_to_earn = int(round(_fget(payload, "days_to_earnings", default=45.0)))
 
     if is_etf:
-        solv_health = 0.45
+        solv_health = 0.0
     else:
         solv_health = (
             0.50 * math.tanh((altman_z - 2.2) / 1.6)
@@ -989,18 +1105,14 @@ def compute_conviction_score_200(payload: Dict[str, Any]) -> Dict[str, Any]:
     ref_sign = 1.0 if is_explicit_call else (-1.0 if is_explicit_put else (1.0 if raw_sum >= 0 else -1.0))
     agree_count = sum(1 for v in pillars.values() if (v * ref_sign) > 2.0)
 
-    synergy_unlocked = bool(
-        agree_count >= 4
-        and net_ev_pct >= 12.0
-        and days_to_earn > 14
-        and spread_pct <= 14.0
-    )
+    # Smooth ramp from compressed tanh curve to full linear synergy across net_ev_pct [6%, 14%]
+    synergy_eligible = bool(agree_count >= 4 and days_to_earn > 14 and spread_pct <= 14.0)
+    syn_blend = float(np.clip((net_ev_pct - 6.0) / 8.0, 0.0, 1.0)) if synergy_eligible else 0.0
+    synergy_unlocked = bool(synergy_eligible and net_ev_pct >= 12.0)
 
     scaled_raw = raw_sum * regime_gate_mult
-    if synergy_unlocked:
-        final_float = scaled_raw
-    else:
-        final_float = 145.0 * math.tanh(scaled_raw / 145.0)
+    compressed = 145.0 * math.tanh(scaled_raw / 145.0)
+    final_float = (1.0 - syn_blend) * compressed + syn_blend * scaled_raw
 
     if is_neutral_action:
         conviction_score_200 = int(max(-35, min(35, round(final_float * 0.45))))

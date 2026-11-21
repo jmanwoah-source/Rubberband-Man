@@ -2,9 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies (curl for healthchecks & network checks)
+# Install system dependencies (curl for healthchecks, tzdata for NY market timezone, ca-certificates for TLS)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    tzdata \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python requirements

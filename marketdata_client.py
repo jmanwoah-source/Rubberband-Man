@@ -20,11 +20,14 @@ import json
 import sqlite3
 import datetime
 import threading
+from collections import OrderedDict
+from contextlib import closing
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional, Tuple
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
@@ -37,31 +40,48 @@ _DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(_DB_DIR, exist_ok=True)
 _MD_CACHE_DB = os.path.join(_DB_DIR, "marketdata_cache.db")
 
-_MEM_CACHE: Dict[str, Tuple[Any, float]] = {}
+_MEM_CACHE: "OrderedDict[str, Tuple[Any, float]]" = OrderedDict()
+_MEM_CACHE_MAX = 1500
+_LAST_SQLITE_PRUNE_TS = 0.0
 _CACHE_LOCK = threading.RLock()
 last_http_status: Optional[int] = None
 
+_RETRY_STRATEGY = Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],
+    respect_retry_after_header=True,
+)
 _SESSION = requests.Session()
-_ADAPTER = HTTPAdapter(pool_connections=25, pool_maxsize=25, max_retries=1)
+_ADAPTER = HTTPAdapter(pool_connections=25, pool_maxsize=25, max_retries=_RETRY_STRATEGY)
 _SESSION.mount("https://", _ADAPTER)
 _SESSION.mount("http://", _ADAPTER)
+
+
+def _ny_tz() -> datetime.tzinfo:
+    try:
+        return ZoneInfo("America/New_York")
+    except Exception:
+        return datetime.timezone(datetime.timedelta(hours=-5))
 
 
 def _init_cache_db() -> None:
     try:
         cutoff = time.time() - (7 * 86400)
-        with sqlite3.connect(_MD_CACHE_DB, timeout=10) as conn:
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS api_cache (
-                    cache_key TEXT PRIMARY KEY,
-                    payload TEXT NOT NULL,
-                    updated_at REAL NOT NULL
+        with closing(sqlite3.connect(_MD_CACHE_DB, timeout=10)) as conn:
+            with conn:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        payload TEXT NOT NULL,
+                        updated_at REAL NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute("DELETE FROM api_cache WHERE updated_at < ?", (cutoff,))
+                conn.execute("DELETE FROM api_cache WHERE updated_at < ?", (cutoff,))
     except Exception:
         pass
 
@@ -81,7 +101,8 @@ def get_marketdata_api_key() -> str:
 
 def get_last_http_status() -> Optional[int]:
     """Returns the most recent HTTP status code recorded by MarketData.app requests (e.g. 200 live, 203 cached)."""
-    return last_http_status
+    with _CACHE_LOCK:
+        return last_http_status
 
 
 def _get_cached(key: str, ttl: int = 300, allow_stale: bool = False) -> Optional[Any]:
@@ -90,10 +111,11 @@ def _get_cached(key: str, ttl: int = 300, allow_stale: bool = False) -> Optional
         if key in _MEM_CACHE:
             val, ts = _MEM_CACHE[key]
             if now - ts < ttl or allow_stale:
+                _MEM_CACHE.move_to_end(key)
                 return val
 
     try:
-        with sqlite3.connect(_MD_CACHE_DB, timeout=5) as conn:
+        with closing(sqlite3.connect(_MD_CACHE_DB, timeout=5)) as conn:
             row = conn.execute(
                 "SELECT payload, updated_at FROM api_cache WHERE cache_key = ?", (key,)
             ).fetchone()
@@ -103,6 +125,9 @@ def _get_cached(key: str, ttl: int = 300, allow_stale: bool = False) -> Optional
                     val = json.loads(payload_str)
                     with _CACHE_LOCK:
                         _MEM_CACHE[key] = (val, ts)
+                        _MEM_CACHE.move_to_end(key)
+                        while len(_MEM_CACHE) > _MEM_CACHE_MAX:
+                            _MEM_CACHE.popitem(last=False)
                     return val
     except Exception:
         pass
@@ -110,16 +135,27 @@ def _get_cached(key: str, ttl: int = 300, allow_stale: bool = False) -> Optional
 
 
 def _set_cached(key: str, val: Any) -> None:
+    global _LAST_SQLITE_PRUNE_TS
     now = time.time()
+    do_prune = False
     with _CACHE_LOCK:
         _MEM_CACHE[key] = (val, now)
+        _MEM_CACHE.move_to_end(key)
+        while len(_MEM_CACHE) > _MEM_CACHE_MAX:
+            _MEM_CACHE.popitem(last=False)
+        if now - _LAST_SQLITE_PRUNE_TS >= 3600.0:
+            _LAST_SQLITE_PRUNE_TS = now
+            do_prune = True
     try:
         payload_str = json.dumps(val)
-        with sqlite3.connect(_MD_CACHE_DB, timeout=5) as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO api_cache (cache_key, payload, updated_at) VALUES (?, ?, ?)",
-                (key, payload_str, now),
-            )
+        with closing(sqlite3.connect(_MD_CACHE_DB, timeout=5)) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO api_cache (cache_key, payload, updated_at) VALUES (?, ?, ?)",
+                    (key, payload_str, now),
+                )
+                if do_prune:
+                    conn.execute("DELETE FROM api_cache WHERE updated_at < ?", (now - 7 * 86400,))
     except Exception:
         pass
 
@@ -143,22 +179,24 @@ def md_get(
         cached = _get_cached(cache_key, ttl=ttl, allow_stale=False)
         if cached is not None:
             if isinstance(cached, dict) and cached.get("http_code"):
-                last_http_status = int(cached["http_code"])
+                with _CACHE_LOCK:
+                    last_http_status = int(cached["http_code"])
             return cached
 
     token = get_marketdata_api_key()
     if not token:
         stale = _get_cached(cache_key, ttl=ttl, allow_stale=True)
-        if stale is not None:
-            return stale
+        if isinstance(stale, dict):
+            return {**stale, "is_stale": True}
         return {"s": "error", "errmsg": "MARKETDATA_API_KEY is missing."}
 
     headers = {"Authorization": f"Bearer {token}"}
     url = f"{MARKETDATA_BASE_URL}{clean_path}"
 
     try:
-        res = _SESSION.get(url, params=p, headers=headers, timeout=12)
-        last_http_status = int(res.status_code)
+        res = _SESSION.get(url, params=p, headers=headers, timeout=(5, 12))
+        with _CACHE_LOCK:
+            last_http_status = int(res.status_code)
         if res.status_code in (200, 203):
             data = res.json()
             if isinstance(data, dict) and data.get("s") == "ok":
@@ -168,13 +206,13 @@ def md_get(
                 return data
             return data if isinstance(data, dict) else {"s": "error", "http_code": int(res.status_code)}
         stale = _get_cached(cache_key, ttl=ttl, allow_stale=True)
-        if stale is not None:
-            return stale
+        if isinstance(stale, dict):
+            return {**stale, "is_stale": True}
         return {"s": "error", "http_code": res.status_code, "errmsg": res.text[:200]}
     except Exception as e:
         stale = _get_cached(cache_key, ttl=ttl, allow_stale=True)
-        if stale is not None:
-            return stale
+        if isinstance(stale, dict):
+            return {**stale, "is_stale": True}
         return {"s": "error", "errmsg": str(e)}
 
 
@@ -297,7 +335,7 @@ def get_candles_df(
         return None
 
     rows = []
-    ny_tz = ZoneInfo("America/New_York")
+    ny_tz = _ny_tz()
     is_daily = resolution.upper() in ("D", "1D", "DAILY")
     for i in range(n):
         dt_ny = datetime.datetime.fromtimestamp(int(ts_list[i]), tz=ny_tz)
@@ -530,7 +568,7 @@ def get_option_chain_native(
     vegas = _col("vega", None)
     updateds = _col("updated", int(time.time()))
 
-    ny_tz = ZoneInfo("America/New_York")
+    ny_tz = _ny_tz()
     rows = []
     for i in range(n):
         exp_ts = int(exps[i] or 0)
@@ -553,7 +591,7 @@ def get_option_chain_native(
             "side": str(sides[i] or "call").lower(),
             "expiration": exp_iso,
             "expirationDate": exp_iso,
-            "dte": int(dtes[i] or 35),
+            "dte": int(dtes[i]) if dtes[i] is not None else 35,
             "strike": float(strikes[i] or 0.0),
             "bid": bid_val,
             "bidSize": int(bid_sizes[i] or 0),
@@ -593,7 +631,7 @@ def get_marketdata_news(symbol: str, limit: int = 5, ttl: int = 600) -> List[Dic
     contents = data.get("content") or []
     sources = data.get("source") or []
     pub_dates = data.get("publicationDate") or []
-    ny_tz = ZoneInfo("America/New_York")
+    ny_tz = _ny_tz()
 
     out = []
     for i in range(min(limit, len(headlines))):
@@ -652,7 +690,6 @@ def get_opra_gamma_walls_and_unusual_flow(
     try:
         df = chain_df if (chain_df is not None and not chain_df.empty) else get_option_chain_native(sym, dte=dte, strike_limit=50, ttl=ttl, feed="cached")
         if df is None or df.empty:
-            _set_cached(cache_key, default_res)
             return default_res
 
         calls = df[df["side"].str.lower() == "call"].copy()
@@ -768,8 +805,7 @@ def get_opra_gamma_walls_and_unusual_flow(
         }
         _set_cached(cache_key, res)
         return res
-    except Exception as e:
-        _set_cached(cache_key, default_res)
+    except Exception:
         return default_res
 
 
@@ -820,14 +856,12 @@ def get_25d_skew_and_spread_optimizer(
     try:
         df = chain_df if (chain_df is not None and not chain_df.empty) else get_option_chain_native(sym, dte=dte, strike_limit=50, ttl=ttl, feed="cached")
         if df is None or df.empty or "delta" not in df.columns or "impliedVolatility" not in df.columns:
-            _set_cached(cache_key, default_out)
             return default_out
 
         calls = df[df["side"].str.lower() == "call"].dropna(subset=["delta", "impliedVolatility"])
         puts = df[df["side"].str.lower() == "put"].dropna(subset=["delta", "impliedVolatility"])
 
         if calls.empty or puts.empty:
-            _set_cached(cache_key, default_out)
             return default_out
 
         # Match Call closest to +0.25 Delta
@@ -920,23 +954,8 @@ def get_25d_skew_and_spread_optimizer(
                 ]
                 return liq if len(liq) >= 2 else tmp[tmp["iv_f"].between(0.05, 2.80)]
 
-            otm_p = _filter_liquid(puts[puts["strike"] <= under_p])
-            otm_c = _filter_liquid(calls[calls["strike"] > under_p])
-            smile_df = pd.concat([otm_p, otm_c]).sort_values("strike").drop_duplicates("strike")
-            if len(smile_df) >= 4:
-                spr_col = pd.to_numeric(smile_df.get("spr_rel", 0.10), errors="coerce").fillna(0.10).to_numpy(dtype=float)
-                inv_w = 1.0 / np.clip(spr_col, 0.02, 0.50)
-                svi_info = quant_kernel.fit_svi_volatility_smile(
-                    smile_df["strike"].to_numpy(dtype=float),
-                    smile_df["impliedVolatility"].to_numpy(dtype=float),
-                    spot=under_p,
-                    t_years=t_exp_yrs,
-                    r=r_ref,
-                    q=0.0,
-                    weights=inv_w,
-                )
-
-            # Put-Call Parity Implied Carry / Hard-to-Borrow Yield from near-ATM pairs
+            # 1. Put-Call Parity Implied Carry / Hard-to-Borrow Yield from near-ATM pairs (needed before SVI forward)
+            q_med = 0.0
             c_liq = _filter_liquid(calls)
             p_liq = _filter_liquid(puts)
             if not c_liq.empty and not p_liq.empty and under_p > 1.0:
@@ -965,6 +984,23 @@ def get_25d_skew_and_spread_optimizer(
                         implied_carry_pct = round(q_med * 100.0, 2)
                         implied_borrow_bps = round(max(0.0, q_med) * 10000.0, 0)
                         synthetic_fwd = round(under_p * math.exp((r_ref - q_med) * t_exp_yrs), 2)
+
+            # 2. Fit SVI Volatility Smile using forward F = S * exp((r - q_med) * T)
+            otm_p = _filter_liquid(puts[puts["strike"] <= under_p])
+            otm_c = _filter_liquid(calls[calls["strike"] > under_p])
+            smile_df = pd.concat([otm_p, otm_c]).sort_values("strike").drop_duplicates("strike")
+            if len(smile_df) >= 4:
+                spr_col = pd.to_numeric(smile_df.get("spr_rel", 0.10), errors="coerce").fillna(0.10).to_numpy(dtype=float)
+                inv_w = 1.0 / np.clip(spr_col, 0.02, 0.50)
+                svi_info = quant_kernel.fit_svi_volatility_smile(
+                    smile_df["strike"].to_numpy(dtype=float),
+                    smile_df["impliedVolatility"].to_numpy(dtype=float),
+                    spot=under_p,
+                    t_years=t_exp_yrs,
+                    r=r_ref,
+                    q=q_med,
+                    weights=inv_w,
+                )
         except Exception:
             svi_info = {}
 
@@ -1006,8 +1042,7 @@ def get_25d_skew_and_spread_optimizer(
         }
         _set_cached(cache_key, res)
         return res
-    except Exception as e:
-        _set_cached(cache_key, default_out)
+    except Exception:
         return default_out
 
 
@@ -1103,7 +1138,8 @@ def get_iv_term_structure_and_implied_move(
         primary_dte = 35
         if primary_chain_df is not None and not primary_chain_df.empty:
             primary_exp = str(primary_chain_df["expiration"].iloc[0] or "")[:10]
-            primary_dte = int(primary_chain_df["dte"].median() or 35)
+            med_dte = primary_chain_df["dte"].median()
+            primary_dte = int(med_dte) if med_dte is not None and not pd.isna(med_dte) else 35
 
         buckets = [
             ("Front", 14, 7, 22),
@@ -1155,7 +1191,6 @@ def get_iv_term_structure_and_implied_move(
                 term_points.append(pt0)
 
         if not term_points:
-            _set_cached(cache_key, default_ts)
             return default_ts
 
         term_points.sort(key=lambda x: x["dte"])
@@ -1231,5 +1266,4 @@ def get_iv_term_structure_and_implied_move(
         _set_cached(cache_key, out)
         return out
     except Exception:
-        _set_cached(cache_key, default_ts)
         return default_ts

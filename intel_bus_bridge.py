@@ -19,9 +19,16 @@ Schema:
 import os
 import sys
 import json
+import uuid
 import sqlite3
 import datetime
+import threading
 from typing import List, Dict, Any, Optional
+from dotenv import load_dotenv
+
+load_dotenv()
+
+_BUS_JSON_LOCK = threading.Lock()
 
 DEFAULT_SEED_SIGNALS = [
     {
@@ -177,6 +184,8 @@ def write_signal_to_bus(signal: Dict[str, Any], bus_dir: Optional[str] = None) -
     last_updated = signal.get("last_updated") or datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # 1. Write to SQLite WAL
+    sqlite_ok = False
+    conn: Optional[sqlite3.Connection] = None
     try:
         conn = init_sqlite_bus(b_dir)
         with conn:
@@ -192,55 +201,87 @@ def write_signal_to_bus(signal: Dict[str, Any], bus_dir: Optional[str] = None) -
                     thesis_hook=excluded.thesis_hook,
                     last_updated=excluded.last_updated;
             """, (sym, track, wiki_score, primary_benchmark, parent_whale, dilution_risk, thesis_hook, last_updated))
-        conn.close()
+        sqlite_ok = True
     except Exception as e:
         print(f"Error writing signal {sym} to SQLite bus: {e}")
-
-    # 2. Write to atomic JSON bridge
-    try:
-        json_path = get_json_bridge_path(b_dir)
-        existing = {}
-        if os.path.exists(json_path):
+    finally:
+        if conn is not None:
             try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    curr_list = json.load(f)
-                    if isinstance(curr_list, list):
-                        for item in curr_list:
-                            existing[item["symbol"]] = item
+                conn.close()
             except Exception:
                 pass
 
-        existing[sym] = {
-            "symbol": sym,
-            "track": track,
-            "wiki_score": wiki_score,
-            "primary_benchmark": primary_benchmark,
-            "parent_whale": parent_whale,
-            "dilution_risk": bool(dilution_risk),
-            "thesis_hook": thesis_hook,
-            "last_updated": last_updated
-        }
+    # 2. Write to atomic JSON bridge (synchronized + unique PID/UUID tmp file)
+    json_ok = False
+    try:
+        json_path = get_json_bridge_path(b_dir)
+        with _BUS_JSON_LOCK:
+            existing: Dict[str, Any] = {}
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        curr_list = json.load(f)
+                        if isinstance(curr_list, list):
+                            for item in curr_list:
+                                if isinstance(item, dict) and item.get("symbol"):
+                                    existing[str(item["symbol"]).upper()] = item
+                except Exception:
+                    pass
 
-        tmp_path = json_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(list(existing.values()), f, indent=2)
-        os.replace(tmp_path, json_path)
-        return True
+            existing[sym] = {
+                "symbol": sym,
+                "track": track,
+                "wiki_score": wiki_score,
+                "primary_benchmark": primary_benchmark,
+                "parent_whale": parent_whale,
+                "dilution_risk": bool(dilution_risk),
+                "thesis_hook": thesis_hook,
+                "last_updated": last_updated
+            }
+
+            tmp_path = f"{json_path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(list(existing.values()), f, indent=2)
+            os.replace(tmp_path, json_path)
+            json_ok = True
     except Exception as e:
         print(f"Error updating signals_bridge.json for {sym}: {e}")
-        return False
+
+    return sqlite_ok and json_ok
 
 
 def seed_intel_bus_if_empty(bus_dir: Optional[str] = None, force_upgrade: bool = False):
-    """Populates initial Track A, Track B, and Track C seeds if no signals exist or upgrades legacy XLE benchmarks."""
+    """Populates initial Track A, Track B, and Track C seeds only when both SQLite and JSON are empty."""
     b_dir = bus_dir or resolve_intel_bus_dir()
     json_path = get_json_bridge_path(b_dir)
     db_path = get_sqlite_db_path(b_dir)
 
-    has_json = os.path.exists(json_path) and os.path.getsize(json_path) > 10
-    has_db = os.path.exists(db_path) and os.path.getsize(db_path) > 0
+    has_json = False
+    if os.path.exists(json_path) and os.path.getsize(json_path) > 10:
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                has_json = isinstance(data, list) and len(data) > 0
+        except Exception:
+            has_json = False
 
-    if not has_json and not has_db or force_upgrade:
+    has_db = False
+    if os.path.exists(db_path) and os.path.getsize(db_path) > 0:
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = init_sqlite_bus(b_dir)
+            cnt = conn.execute("SELECT COUNT(*) FROM intel_signals;").fetchone()[0]
+            has_db = cnt > 0
+        except Exception:
+            has_db = False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    if (not has_json and not has_db) or force_upgrade:
         for s in DEFAULT_SEED_SIGNALS:
             write_signal_to_bus(s, b_dir)
 
@@ -249,14 +290,16 @@ def read_intel_bus_signals(bus_dir: Optional[str] = None) -> List[Dict[str, Any]
     """
     Reads all available Track A, B, and C signals from the shared GX10 Intel Bus.
     Automatically normalizes any legacy XLE/XLI benchmark references to URA.
+    Never overwrites live signals with hardcoded seed records.
     """
     b_dir = bus_dir or resolve_intel_bus_dir()
-    seed_intel_bus_if_empty(b_dir)
+    seed_intel_bus_if_empty(b_dir, force_upgrade=False)
 
     signals: List[Dict[str, Any]] = []
 
     db_path = get_sqlite_db_path(b_dir)
     if os.path.exists(db_path):
+        conn: Optional[sqlite3.Connection] = None
         try:
             conn = init_sqlite_bus(b_dir)
             cursor = conn.cursor()
@@ -274,16 +317,16 @@ def read_intel_bus_signals(bus_dir: Optional[str] = None) -> List[Dict[str, Any]
                     "thesis_hook": r[6],
                     "last_updated": r[7]
                 })
-            conn.close()
             if signals:
-                # Ensure new default seeds (like OKLO, SYM) are present
-                existing_syms = {s["symbol"] for s in signals}
-                if "OKLO" not in existing_syms or "SYM" not in existing_syms:
-                    seed_intel_bus_if_empty(b_dir, force_upgrade=True)
-                    return read_intel_bus_signals(b_dir)
                 return signals
         except Exception as e:
             print(f"Warning reading SQLite bus: {e}")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     json_path = get_json_bridge_path(b_dir)
     if os.path.exists(json_path):

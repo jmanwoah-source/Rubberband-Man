@@ -20,17 +20,20 @@ Core Pillars:
 """
 
 import os
+import re
 import time
 import math
 import json
 import sqlite3
 import threading
 import datetime
+from contextlib import closing
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Optional, Tuple
@@ -140,30 +143,50 @@ os.makedirs(_DATA_DIR, exist_ok=True)
 _FMP_CACHE_DB = os.path.join(_DATA_DIR, "fmp_cache.db")
 
 
+_LAST_FMP_SQLITE_PRUNE_TS = 0.0
+
+
+def _redact_secrets(msg: str) -> str:
+    s = re.sub(r"([?&](?:apikey|token)=)[^&\s'\"]+", r"\1[REDACTED]", str(msg or ""), flags=re.IGNORECASE)
+    return re.sub(r"(Bearer\s+)[A-Za-z0-9._\-]+", r"\1[REDACTED]", s, flags=re.IGNORECASE)
+
+
+def _fmp_cache_key(endpoint: str, params: Optional[Dict[str, Any]] = None) -> str:
+    return f"{endpoint}_{sorted((params or {}).items())}"
+
+
 def _init_fmp_cache_db() -> None:
     try:
         cutoff = time.time() - (7 * 86400)
-        with sqlite3.connect(_FMP_CACHE_DB, timeout=10) as conn:
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fmp_http_cache (
-                    cache_key TEXT PRIMARY KEY,
-                    ts REAL NOT NULL,
-                    ttl INTEGER NOT NULL,
-                    payload TEXT NOT NULL
+        with closing(sqlite3.connect(_FMP_CACHE_DB, timeout=10)) as conn:
+            with conn:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS fmp_http_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        ts REAL NOT NULL,
+                        ttl INTEGER NOT NULL,
+                        payload TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute("DELETE FROM fmp_http_cache WHERE ts < ?", (cutoff,))
+                conn.execute("DELETE FROM fmp_http_cache WHERE ts < ?", (cutoff,))
     except Exception:
         pass
 
 
 _init_fmp_cache_db()
 
+_FMP_RETRY = Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],
+    respect_retry_after_header=True,
+)
 _HTTP_SESSION = requests.Session()
-_HTTP_ADAPTER = HTTPAdapter(pool_connections=25, pool_maxsize=25, max_retries=1)
+_HTTP_ADAPTER = HTTPAdapter(pool_connections=25, pool_maxsize=25, max_retries=_FMP_RETRY)
 _HTTP_SESSION.mount("https://", _HTTP_ADAPTER)
 _HTTP_SESSION.mount("http://", _HTTP_ADAPTER)
 
@@ -216,7 +239,7 @@ def get_cached(key: str, ttl: int = CACHE_TTL) -> Optional[Any]:
             del _CACHE_STORE[key]
 
     try:
-        with sqlite3.connect(_FMP_CACHE_DB, timeout=5) as conn:
+        with closing(sqlite3.connect(_FMP_CACHE_DB, timeout=5)) as conn:
             row = conn.execute(
                 "SELECT payload, ts, ttl FROM fmp_http_cache WHERE cache_key = ?", (key,)
             ).fetchone()
@@ -234,7 +257,9 @@ def get_cached(key: str, ttl: int = CACHE_TTL) -> Optional[Any]:
 
 
 def set_cached(key: str, val: Any, ttl: int = CACHE_TTL) -> None:
+    global _LAST_FMP_SQLITE_PRUNE_TS
     now = time.time()
+    do_prune = False
     with _CACHE_LOCK:
         # Periodic batch pruning if cache exceeds maximum capacity
         if len(_CACHE_STORE) >= _CACHE_MAX_ENTRIES:
@@ -246,14 +271,23 @@ def set_cached(key: str, val: Any, ttl: int = CACHE_TTL) -> None:
                 for k in oldest_keys:
                     _CACHE_STORE.pop(k, None)
         _CACHE_STORE[key] = (val, now)
+        if now - _LAST_FMP_SQLITE_PRUNE_TS >= 3600.0:
+            _LAST_FMP_SQLITE_PRUNE_TS = now
+            do_prune = True
 
     try:
         payload_str = json.dumps(val)
-        with sqlite3.connect(_FMP_CACHE_DB, timeout=5) as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO fmp_http_cache (cache_key, ts, ttl, payload) VALUES (?, ?, ?, ?)",
-                (key, now, int(ttl), payload_str),
-            )
+        with closing(sqlite3.connect(_FMP_CACHE_DB, timeout=5)) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO fmp_http_cache (cache_key, ts, ttl, payload) VALUES (?, ?, ?, ?)",
+                    (key, now, int(ttl), payload_str),
+                )
+                if do_prune:
+                    conn.execute(
+                        "DELETE FROM fmp_http_cache WHERE ts < ? OR (? - ts) > MAX(ttl, 86400)",
+                        (now - 7 * 86400, now),
+                    )
     except Exception:
         # Non-JSON-serializable entries (e.g. DataFrame tuples) remain fast in L1 RAM only
         pass
@@ -264,7 +298,7 @@ def get_ny_now() -> datetime.datetime:
     try:
         return datetime.datetime.now(ZoneInfo("America/New_York"))
     except Exception:
-        return datetime.datetime.now()
+        return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-5)))
 
 
 def fmp_get(endpoint: str, params: Optional[Dict[str, Any]] = None, use_cache: bool = True, ttl: int = CACHE_TTL) -> Any:
@@ -282,7 +316,7 @@ def fmp_get(endpoint: str, params: Optional[Dict[str, Any]] = None, use_cache: b
         if q_cached is not None:
             return [q_cached]
 
-    cache_key = f"{endpoint}_{sorted(params.items())}" if use_cache else None
+    cache_key = _fmp_cache_key(endpoint, params) if use_cache else None
     if cache_key:
         cached = get_cached(cache_key, ttl=ttl)
         if cached is not None:
@@ -292,7 +326,7 @@ def fmp_get(endpoint: str, params: Optional[Dict[str, Any]] = None, use_cache: b
     params_with_key["apikey"] = api_key
     url = f"{FMP_STABLE_URL}/{endpoint}"
     try:
-        res = _HTTP_SESSION.get(url, params=params_with_key, timeout=12)
+        res = _HTTP_SESSION.get(url, params=params_with_key, timeout=(5, 12))
         if res.status_code == 200:
             data = res.json()
             if cache_key:
@@ -300,9 +334,9 @@ def fmp_get(endpoint: str, params: Optional[Dict[str, Any]] = None, use_cache: b
             if endpoint == "quote" and isinstance(data, list) and len(data) == 1 and "symbol" in data[0]:
                 set_cached(f"quote_single_{data[0]['symbol'].upper()}", data[0], ttl=ttl)
             return data
-        return {"error": f"HTTP {res.status_code}: {res.text}"}
+        return {"error": _redact_secrets(f"HTTP {res.status_code}: {res.text[:250]}")}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": _redact_secrets(str(e))}
 
 
 def fmp_batch_quotes(symbols: List[str], ttl: int = 120) -> Dict[str, Dict[str, Any]]:
@@ -445,7 +479,7 @@ def get_hybrid_price_series(symbol: str, fetch_4h: bool = True) -> Tuple[pd.Data
                     "volume": float(last_r["volume"])
                 }
     else:
-        h4_cached = get_cached(f"historical-chart/4hour_{json.dumps({'symbol': sym}, sort_keys=True)}", ttl=600)
+        h4_cached = get_cached(_fmp_cache_key("historical-chart/4hour", {"symbol": sym}), ttl=600)
         if isinstance(h4_cached, list) and len(h4_cached) > 0:
             latest_4h = h4_cached[0]
 
@@ -520,8 +554,12 @@ def calculate_wilders_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_gain = gain.ewm(alpha=alpha, adjust=False).mean()
     avg_loss = loss.ewm(alpha=alpha, adjust=False).mean()
 
-    rs = avg_gain / avg_loss.replace(0, 1e-9)
+    both_zero = (avg_gain <= 1e-12) & (avg_loss <= 1e-12)
+    only_loss_zero = (avg_loss <= 1e-12) & (avg_gain > 1e-12)
+    rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi.where(~only_loss_zero, 100.0)
+    rsi = rsi.where(~both_zero, 50.0)
     return rsi
 
 
@@ -542,10 +580,10 @@ def calculate_yang_zhang_volatility(open_s: pd.Series, high_s: pd.Series, low_s:
     Returns: (current_yz_vol_pct, vol_rank_1y_pct)
     """
     try:
-        o = open_s.replace(0, np.nan).ffill()
-        h = high_s.replace(0, np.nan).ffill()
-        l = low_s.replace(0, np.nan).ffill()
-        c = close_s.replace(0, np.nan).ffill()
+        o = open_s.where(open_s > 0, np.nan).ffill()
+        h = high_s.where(high_s > 0, np.nan).ffill()
+        l = low_s.where(low_s > 0, np.nan).ffill()
+        c = close_s.where(close_s > 0, np.nan).ffill()
         c_prev = c.shift(1)
 
         log_oc_prev = np.log(o / c_prev)
@@ -586,12 +624,11 @@ def calculate_ou_half_life_and_hurst(spread_series: pd.Series, price_series: pd.
     Computes:
     1. 180-Day Ornstein-Uhlenbeck (O-U) Mean-Reversion Half-Life τ_1/2 (in trading days) via AR(1) regression:
        ΔX_t = α + φ * X_{t-1} + ε_t  =>  τ_1/2 = -ln(2) / ln(1 + φ)
-    2. 252-Day Variance-Ratio Mean-Reversion / Persistence Score (H in [0.22, 0.78])
-       (Expanded from 65/90d to 180/252d to rule out short-sample statistical noise)
+    2. 252-Day Multi-Lag Lo-MacKinlay Adjusted Variance-Ratio Hurst Exponent (H in [0.22, 0.78])
     Returns: (half_life_days, hurst_exponent, regime_label)
     """
-    half_life = 4.2
-    hurst = 0.46
+    half_life = 8.0
+    hurst = 0.50
     try:
         s = spread_series.dropna().tail(180)
         if len(s) >= 40:
@@ -611,16 +648,26 @@ def calculate_ou_half_life_and_hurst(spread_series: pd.Series, price_series: pd.
                     elif phi <= -0.95:
                         half_life = 1.2
                     else:
-                        half_life = 14.5
+                        half_life = 22.0
 
-        p = np.log(price_series.dropna().tail(252).replace(0, np.nan).dropna())
+        p_pos = price_series.dropna().tail(252)
+        p_pos = p_pos[p_pos > 0]
+        p = np.log(p_pos)
         if len(p) >= 60:
+            n_p = len(p)
             var_1 = float(p.diff(1).var())
-            var_5 = float(p.diff(5).var())
-            if var_1 > 1e-9 and var_5 > 1e-9:
-                vr_5 = max(0.25, min(3.5, var_5 / (5.0 * var_1)))
-                h_est = 0.5 + (math.log(vr_5) / (2.0 * math.log(5.0)))
-                hurst = float(np.clip(h_est, 0.22, 0.78))
+            h_lags: List[float] = []
+            for q_lag in (2, 5, 10):
+                d_q = p.diff(q_lag).dropna()
+                if len(d_q) >= 20 and var_1 > 1e-9:
+                    # Lo-MacKinlay finite-sample degrees-of-freedom bias adjustment
+                    dof_adj = max(1.0, (n_p - 1.0) / max(1.0, (n_p - q_lag)))
+                    var_q = float(d_q.var()) * dof_adj
+                    if var_q > 1e-9:
+                        vr_q = max(0.25, min(3.5, var_q / (q_lag * var_1)))
+                        h_lags.append(0.5 + (math.log(vr_q) / (2.0 * math.log(q_lag))))
+            if h_lags:
+                hurst = float(np.clip(float(np.mean(h_lags)), 0.22, 0.78))
     except Exception:
         pass
 
@@ -662,10 +709,9 @@ def calculate_empirical_basis_expectation(
 ) -> Dict[str, Any]:
     """
     Walk-forward 5-Year (~1,250-day) Empirical Conditional Basis % Move Estimator:
-    Finds historical instances with similar Z-stretch (excluding isolated >3.5-sigma
-    earnings shock windows so non-earnings setups stay uncontaminated), de-clusters
-    overlapping 5D windows to report independent episode count N_eff, and enforces an
-    option-viable win hurdle beyond Theta breakeven.
+    Finds historical instances with similar Z-stretch (strictly using causal/entry-bar
+    shock detection with zero future-bar censoring), de-clusters overlapping 5D windows
+    with >=5 trading-day spacing, and enforces an option-viable win hurdle.
     """
     try:
         if not np.isfinite(curr_z):
@@ -690,15 +736,15 @@ def calculate_empirical_basis_expectation(
         if n_bars < 30:
             return _default_empirical_fallback(action, max(1, n_bars))
 
-        # Flag extreme isolated 1-day jump shock bars (>3.5 sigma or >7.5%) to filter earnings gaps
+        # Causal shock detection: check ONLY entry bar & trailing bar [max(0, i-1) : i+1] (zero lookahead!)
         ret_1d = np.zeros(len(c_arr), dtype=float)
         ret_1d[1:] = np.abs(np.diff(c_arr) / np.maximum(1e-4, c_arr[:-1]))
-        daily_std = float(np.std(ret_1d[1:])) if len(ret_1d) > 20 else 0.025
+        daily_std = float(np.std(ret_1d[1:max(21, n_bars)])) if n_bars > 20 else 0.025
         shock_thresh = max(0.075, 3.5 * daily_std)
         is_shock_window = np.zeros(n_bars, dtype=bool)
         for i in range(n_bars):
             lo_w = max(0, i - 1)
-            hi_w = min(len(ret_1d), i + 6)
+            hi_w = i + 1
             if np.max(ret_1d[lo_w:hi_w]) > shock_thresh:
                 is_shock_window[i] = True
 
@@ -725,12 +771,12 @@ def calculate_empirical_basis_expectation(
                 mask_q = np.abs(z_hist) <= 0.65
             mask = (mask_q & (~is_shock_window)) if np.sum(mask_q & (~is_shock_window)) >= 15 else mask_q
 
-        # Count de-clustered independent analog episodes (>= 3 trading days spacing)
+        # Count de-clustered independent analog episodes (>= 5 trading days spacing -> zero overlap)
         analog_indices = np.where(mask)[0]
         n_eff = 0
         last_picked = -10
         for idx_a in analog_indices:
-            if int(idx_a) - last_picked >= 3:
+            if int(idx_a) - last_picked >= 5:
                 n_eff += 1
                 last_picked = int(idx_a)
         n_eff = max(1, n_eff)
@@ -752,20 +798,20 @@ def calculate_empirical_basis_expectation(
         med_close = float(np.median(sub_close))
         mean_close = float(np.mean(sub_close))
 
-        # Honest option-viable hit rate: Day-5 close covers theta carry, OR MFE clears target without severe Day-5 giveback
+        # Honest option-viable hit rate: Day-5 close clears theta carry (+1.25%), OR MFE clears target without Day-5 giveback
         if "CALL" in action:
             unconditional_close = 0.65 * med_close + 0.35 * mean_close
-            exp_basis = round(0.55 * med_up + 0.45 * unconditional_close, 2)
-            min_opt_hurdle = max(2.2, med_up * 0.65)
-            wins = (sub_close >= 0.65) | ((sub_up >= min_opt_hurdle) & (sub_close >= -0.35))
+            exp_basis = round(0.25 * med_up + 0.75 * unconditional_close, 2)
+            min_opt_hurdle = max(2.8, med_up * 0.70)
+            wins = (sub_close >= 1.25) | ((sub_up >= min_opt_hurdle) & (sub_close >= 0.0))
         elif "PUT" in action:
             unconditional_close = 0.65 * med_close + 0.35 * mean_close
-            exp_basis = round(0.55 * med_dn + 0.45 * unconditional_close, 2)
-            min_opt_hurdle = max(2.2, abs(med_dn) * 0.65)
-            wins = (sub_close <= -0.65) | ((np.abs(sub_dn) >= min_opt_hurdle) & (sub_close <= 0.35))
+            exp_basis = round(0.25 * med_dn + 0.75 * unconditional_close, 2)
+            min_opt_hurdle = max(2.8, abs(med_dn) * 0.70)
+            wins = (sub_close <= -1.25) | ((np.abs(sub_dn) >= min_opt_hurdle) & (sub_close <= 0.0))
         else:
             exp_basis = round(med_close, 2)
-            wins = np.abs(sub_close) >= 1.0
+            wins = np.abs(sub_close) >= 1.25
 
         win_rate = float(np.clip(np.mean(wins) * 100.0, 18.0, 92.0))
         sample_n = int(len(sub_up))
@@ -1178,9 +1224,10 @@ def calculate_rubberband_metrics_v3(
     b_std20 = float(std20_series.iloc[-1]) if (not np.isnan(std20_series.iloc[-1]) and std20_series.iloc[-1] <= curr_close * 0.25) else curr_close * 0.04
 
     # 3. Absolute Institutional Price Stretch (Z_abs) & Keltner/Bollinger Squeeze Ratio
-    # Keltner half-width = 1.60 * ATR14; Bollinger half-width = 1.0 * std20
-    z_keltner_series = (merged["t_close"] - equil_series) / (1.55 * atr14_series.clip(lower=curr_close * 0.008))
-    z_bollinger_series = (merged["t_close"] - sma20_series) / std20_series.clip(lower=curr_close * 0.008)
+    # Keltner half-width = 1.60 * ATR14; Bollinger half-width = 1.0 * std20 (row-wise floor avoids future-spot lookahead)
+    row_floor = (merged["t_close"] * 0.008).clip(lower=1e-4)
+    z_keltner_series = (merged["t_close"] - equil_series) / (1.55 * atr14_series.clip(lower=row_floor))
+    z_bollinger_series = (merged["t_close"] - sma20_series) / std20_series.clip(lower=row_floor)
     z_abs_series = (0.60 * z_keltner_series + 0.40 * z_bollinger_series).clip(lower=-3.45, upper=3.45)
 
     # Volatility Squeeze Ratio: BB Width / Keltner Width (< 0.92 indicates tightly coiled spring)
@@ -1188,10 +1235,11 @@ def calculate_rubberband_metrics_v3(
     squeeze_ratio = float(squeeze_ratio_series.iloc[-1]) if not np.isnan(squeeze_ratio_series.iloc[-1]) else 1.05
     is_volatility_squeeze = (squeeze_ratio <= 0.94)
 
-    # 4. Relative Residual Stretch vs Benchmark (Z_rel_5d & Z_rel_3d)
+    # 4. Relative Residual Stretch vs Benchmark (Z_rel_5d & Z_rel_3d) using lagged beta to avoid lookahead
     merged["t_5d_ret"] = np.log(merged["t_close"] / merged["t_close"].shift(5))
     merged["b_5d_ret"] = np.log(merged["b_close"] / merged["b_close"].shift(5))
-    merged["resid_5d"] = merged["t_5d_ret"] - (beta_series * merged["b_5d_ret"])
+    beta_lag5 = beta_series.shift(5).fillna(beta_series)
+    merged["resid_5d"] = merged["t_5d_ret"] - (beta_lag5 * merged["b_5d_ret"])
 
     roll_mean_5d = merged["resid_5d"].rolling(60, min_periods=20).mean()
     roll_std_5d = merged["resid_5d"].rolling(60, min_periods=20).std().replace(0, np.nan).fillna(0.025)
@@ -1199,7 +1247,8 @@ def calculate_rubberband_metrics_v3(
 
     merged["t_3d_ret"] = np.log(merged["t_close"] / merged["t_close"].shift(3))
     merged["b_3d_ret"] = np.log(merged["b_close"] / merged["b_close"].shift(3))
-    merged["resid_3d"] = merged["t_3d_ret"] - (beta_series * merged["b_3d_ret"])
+    beta_lag3 = beta_series.shift(3).fillna(beta_series)
+    merged["resid_3d"] = merged["t_3d_ret"] - (beta_lag3 * merged["b_3d_ret"])
     roll_mean_3d = merged["resid_3d"].rolling(60, min_periods=20).mean()
     roll_std_3d = merged["resid_3d"].rolling(60, min_periods=20).std().replace(0, np.nan).fillna(0.02)
     z_rel_3d_series = ((merged["resid_3d"] - roll_mean_3d) / roll_std_3d).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.45, 3.45)
@@ -1284,7 +1333,15 @@ def calculate_rubberband_metrics_v3(
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     market_close = ny_now.replace(hour=16, minute=0, second=0, microsecond=0)
 
-    if market_open <= ny_now <= market_close and ny_now.weekday() < 5:
+    last_bar_is_today = False
+    try:
+        if "date" in merged.columns and pd.notna(merged["date"].iloc[-1]):
+            last_bar_dt = pd.to_datetime(merged["date"].iloc[-1]).date()
+            last_bar_is_today = (last_bar_dt == ny_now.date())
+    except Exception:
+        last_bar_is_today = False
+
+    if last_bar_is_today and market_open <= ny_now <= market_close and ny_now.weekday() < 5:
         mins_elapsed = max(15.0, (ny_now - market_open).total_seconds() / 60.0)
         x_frac = min(1.0, mins_elapsed / 390.0)
         # True Cumulative U-Shaped Institutional Volume Integral (heavier open & close, lighter midday)
@@ -1597,14 +1654,18 @@ def calculate_rubberband_metrics_v3(
         "p25_up_pct": emp_basis.get("p25_up_pct", round(emp_basis["expected_up_basis_pct"] * 0.55, 2)),
         "p75_up_pct": emp_basis.get("p75_up_pct", emp_basis["p75_basis_pct"]),
         "p90_up_pct": emp_basis.get("p90_up_pct", round(emp_basis["expected_up_basis_pct"] * 1.65, 2)),
+        "p10_close_pct": emp_basis.get("p10_close_pct", round(emp_basis["expected_down_basis_pct"] * 1.15, 2)),
         "p25_close_pct": emp_basis.get("p25_close_pct", round(emp_basis["expected_down_basis_pct"] * 0.45, 2)),
+        "p50_close_pct": emp_basis.get("med_close_pct", round(emp_basis["expected_basis_pct"] * 0.55, 2)),
         "med_close_pct": emp_basis.get("med_close_pct", round(emp_basis["expected_basis_pct"] * 0.55, 2)),
         "p75_close_pct": emp_basis.get("p75_close_pct", round(emp_basis["expected_up_basis_pct"] * 0.75, 2)),
+        "p90_close_pct": emp_basis.get("p90_close_pct", round(emp_basis["expected_up_basis_pct"] * 1.25, 2)),
         "p25_dn_pct": emp_basis.get("p25_dn_pct", round(emp_basis["expected_down_basis_pct"] * 0.55, 2)),
         "p75_dn_pct": emp_basis.get("p75_dn_pct", round(emp_basis["expected_down_basis_pct"] * 1.35, 2)),
         "p90_dn_pct": emp_basis.get("p90_dn_pct", round(emp_basis["expected_down_basis_pct"] * 1.75, 2)),
         "empirical_win_rate_pct": emp_basis["empirical_win_rate_pct"],
         "empirical_sample_n": emp_basis["empirical_sample_n"],
+        "empirical_sample_n_eff": emp_basis.get("empirical_sample_n_eff", max(1, int(round(emp_basis["empirical_sample_n"] * 0.45)))),
         "basis_summary": emp_basis["basis_summary"],
         # New Live Tape Sharp / Whale Flow Telemetry
         "cmf_20": sharp_flow["cmf_20"],
@@ -1702,6 +1763,22 @@ def get_temporal_regime(override_day: Optional[int] = None) -> Dict[str, Any]:
         playbook_desc = "Monitoring 1–5 day inflection hooks, volatility squeezes & institutional trend convergence."
         playbook_pill_color = "#C58AF9"
 
+    bias_pts_map = {
+        "BULLISH_REVERSION_DISCOUNT": 12.0,
+        "BULLISH_MOMENTUM": 10.0,
+        "SELECTIVE": 4.0,
+        "DEFENSIVE": -10.0,
+        "NEUTRAL": 0.0,
+    }
+    day_edge_score = bias_pts_map.get(seasonality_bias, 0.0)
+    if is_early_week_washout:
+        day_edge_score += 4.0
+    elif is_friday_mode:
+        day_edge_score -= 3.0
+    if is_opex_week:
+        day_edge_score -= 4.0
+    day_edge_score = round(float(np.clip(day_edge_score, -25.0, 25.0)), 1)
+
     return {
         "weekday": weekday,
         "weekday_name": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][weekday],
@@ -1713,7 +1790,8 @@ def get_temporal_regime(override_day: Optional[int] = None) -> Dict[str, Any]:
         "is_opex_week": is_opex_week,
         "is_window_dressing": is_window_dressing,
         "seasonality_tag": seasonality_tag,
-        "seasonality_bias": seasonality_bias
+        "seasonality_bias": seasonality_bias,
+        "day_edge_score": day_edge_score,
     }
 
 
@@ -2106,29 +2184,29 @@ Keep every line razor-sharp, quantitative, and free of filler."""
     backend = llm_router.get_active_backend()
     model_label = "Gemini 3.5 Flash Lite" if backend == "gemini" else "ASUS GX10 (Qwen 3.8)"
 
+    parsed_score = 0
+    is_fallback = False
     try:
         raw_text, err = llm_router.generate_text(
             prompt,
             system_instruction="You are an elite quantitative hedge fund macro strategist. Deliver ruthless, concise insights.",
             temperature=0.2
         )
-        parsed_score = 15
         bullets = []
         if raw_text and not err:
-            import re
             score_match = re.search(r"\[SENTIMENT_SCORE\]\s*:\s*([+-]?\d+)", raw_text, re.IGNORECASE)
             if score_match:
                 try:
                     parsed_score = max(-100, min(100, int(score_match.group(1))))
                 except Exception:
-                    parsed_score = 15
+                    parsed_score = 0
             else:
                 num_match = re.search(r"(-?\d{1,3})\s*/\s*100", raw_text)
                 if num_match:
                     try:
                         parsed_score = max(-100, min(100, int(num_match.group(1))))
                     except Exception:
-                        parsed_score = 15
+                        parsed_score = 0
 
             # Extract the 3 core lines
             for tag, prefix in [("[MACRO_PULSE]", "Macro Pulse"), ("[ASSET_TRANSMISSION]", "Asset Transmission"), ("[TACTICAL_DIRECTIVE]", "Tactical Directive")]:
@@ -2143,12 +2221,14 @@ Keep every line razor-sharp, quantitative, and free of filler."""
                         bullets.append(clean_l)
                 bullets = bullets[:3]
         else:
+            is_fallback = True
             bullets = [
                 "[Macro Pulse]: Breaking feeds indicate balanced two-way flow across rates and equity benchmarks.",
                 "[Asset Transmission]: Sector-specific earnings dispersion dominates broad index beta with steady credit spreads.",
                 "[Tactical Directive]: Maintain disciplined sizing in 30-45 DTE options within defined volatility corridors."
             ]
     except Exception as e:
+        is_fallback = True
         bullets = [
             f"Active telemetry monitored across 6 live breaking feeds ({str(e)[:40]}).",
             "Macro risk runway remains within standard operational bounds.",
@@ -2158,11 +2238,12 @@ Keep every line razor-sharp, quantitative, and free of filler."""
     result = {
         "bullets": bullets,
         "sentiment_score": parsed_score,
-        "risk_verdict": "ACTIVE AI SYNTHESIS",
+        "risk_verdict": "QUANT / FEED FALLBACK" if is_fallback else "ACTIVE AI SYNTHESIS",
         "model_used": model_label,
+        "is_fallback": is_fallback,
         "timestamp": time.time()
     }
-    set_cached(cache_key, result)
+    set_cached(cache_key, result, ttl=120 if is_fallback else CACHE_TTL)
     return result
 
 
@@ -3614,7 +3695,7 @@ def batch_get_short_squeeze_warnings(symbols: List[str]) -> Dict[str, Dict[str, 
     out = {}
     uncached = []
     for s in clean_syms:
-        c = get_cached(f"equity_short_float_v4_{s}", ttl=14400)
+        c = get_cached(f"equity_short_float_v5_{s}", ttl=14400)
         if c is not None:
             out[s] = c
         else:
@@ -4374,19 +4455,26 @@ def audit_headlines_with_gemini(symbol: str, headlines: List[Dict[str, str]]) ->
         )
         text, err = llm_router.generate_text(prompt, temperature=0.1)
         if err or not text:
-            return {"verdict": "GREEN_LIGHT", "summary": "Sympathy / technical move verified.", "is_structural_blowup": False}
+            return {
+                "verdict": "UNVERIFIED_ERROR",
+                "summary": f"Headline audit unavailable ({err or 'empty LLM response'}): treat setup with caution.",
+                "is_structural_blowup": False,
+                "audit_failed": True,
+            }
         is_quarantine = "[QUARANTINE]" in text.upper()
         verdict = "QUARANTINE" if is_quarantine else "GREEN_LIGHT"
         return {
             "verdict": verdict,
             "summary": text.replace("[GREEN_LIGHT]", "").replace("[QUARANTINE]", "").strip(),
-            "is_structural_blowup": is_quarantine
+            "is_structural_blowup": is_quarantine,
+            "audit_failed": False,
         }
     except Exception as e:
         return {
-            "verdict": "GREEN_LIGHT",
-            "summary": f"Sympathy move verified ({str(e)[:50]}).",
-            "is_structural_blowup": False
+            "verdict": "UNVERIFIED_ERROR",
+            "summary": f"Headline audit exception ({str(e)[:50]}): treat setup with caution.",
+            "is_structural_blowup": False,
+            "audit_failed": True,
         }
 
 
@@ -4454,7 +4542,8 @@ def structure_30_45_dte_blueprint(
     exp_abs_basis = abs(exp_basis_pct)
     emp_win_rate = float(metrics.get("empirical_win_rate_pct", 54.0))
 
-    whale_score = float(whale_oi.get("whale_score", metrics.get("sharp_tape_score", 0.0))) if whale_oi else float(metrics.get("sharp_tape_score", 0.0))
+    _fb_whale = (float(metrics.get("sharp_tape_score", 50.0) or 50.0) - 50.0) * 2.0
+    whale_score = float(whale_oi.get("whale_score", _fb_whale)) if whale_oi else _fb_whale
     whale_badge = whale_oi.get("whale_badge", metrics.get("sharp_badge", "TWO-WAY FLOW")) if whale_oi else metrics.get("sharp_badge", "TWO-WAY FLOW")
 
     days_to_earn = int(earnings_info.get("days_to_earnings", 45)) if earnings_info else 45
@@ -4743,8 +4832,9 @@ def structure_30_45_dte_blueprint(
         structure_type = (
             f"Expected 5D Basis: {exp_basis_pct:+.1f}% ({emp_win_rate:.0f}% 5Y Win) | {whale_badge}{earn_tag}"
         )
+        p75_abs = abs(float(metrics.get("p75_basis_pct", abs(exp_basis_pct) * 1.4)))
         structure_rationale = (
-            f"{playbook}: 5Y Historical Basis Expectation {exp_basis_pct:+.1f}% (P75: -{metrics.get('p75_basis_pct', abs(exp_basis_pct)*1.4):.1f}%, "
+            f"{playbook}: 5Y Historical Basis Expectation {exp_basis_pct:+.1f}% (P75: -{p75_abs:.1f}%, "
             f"Half-Life {half_life:.1f}d) toward ${metrics['target_price']:.2f}. {whale_oi.get('whale_summary', '') if whale_oi else ''}"
         )
     else:
@@ -4996,17 +5086,38 @@ def calculate_options_volatility_and_spread_telemetry(
     theta_hold_pct = round((theta_hold_dollar / max(1.0, invested_naked)) * 100.0, 1)
     daily_theta_dollar = round(theta_hold_dollar / max(1, hold_d), 1)
 
+    def _bs_price_q(
+        s_val: float,
+        k_val: float,
+        t_val: float,
+        r_val: float,
+        sig_val: float,
+        q_val: float,
+        call_flag: bool,
+    ) -> Tuple[float, float]:
+        try:
+            import quant_kernel
+            g_bs = quant_kernel.black_scholes_all_greeks(
+                s_val, k_val, t_val, r_val, sig_val, is_call=call_flag, q=q_val
+            )
+            return float(g_bs["price"]), float(g_bs["delta"])
+        except Exception:
+            if call_flag:
+                return bs_call_price_delta(s_val, k_val, t_val, r_val, sig_val)
+            return bs_put_price_delta(s_val, k_val, t_val, r_val, sig_val)
+
     daily_theta_per_sh = max(0.005, max(daily_theta_exact, abs(theta_hold_per_sh) / max(1, hold_d)))
     gamma_theta_ratio = round((gamma_est * spot * 0.01) / daily_theta_per_sh, 2)
-    daily_gamma_rent = 0.5 * gamma_est * (spot ** 2) * (((hv20_pct / 100.0) / math.sqrt(252.0)) ** 2)
+    # Match calendar-day daily_theta_per_sh (1/365) with calendar-day realized variance (1/365)
+    daily_gamma_rent = 0.5 * gamma_est * (spot ** 2) * (((hv20_pct / 100.0) / math.sqrt(365.0)) ** 2)
     variance_rent_ratio = round(daily_gamma_rent / daily_theta_per_sh, 2)
 
     # Dynamic Hold-Day Breakeven Spot Price (Binary search for Spot where Option(S, T_out, sigma_out) == prem_entry)
     if is_call:
-        lo_s, hi_s = spot * 0.90, max(spot * 1.25, eff_strike * 1.15)
-        for _ in range(14):
+        lo_s, hi_s = spot * 0.60, max(spot * 1.80, eff_strike * 1.60)
+        for _ in range(22):
             mid_s = 0.5 * (lo_s + hi_s)
-            val_m, _ = bs_call_price_delta(mid_s, eff_strike, T_out, eff_r, sigma_out)
+            val_m, _ = _bs_price_q(mid_s, eff_strike, T_out, eff_r, sigma_out, eff_q, True)
             if val_m * skew_mult < prem_entry:
                 lo_s = mid_s
             else:
@@ -5014,10 +5125,10 @@ def calculate_options_volatility_and_spread_telemetry(
         be_hold_price = round(0.5 * (lo_s + hi_s), 2)
         be_exp_price = round(eff_strike + prem_entry, 2)
     else:
-        lo_s, hi_s = min(spot * 0.75, eff_strike * 0.85), spot * 1.10
-        for _ in range(14):
+        lo_s, hi_s = max(0.05, min(spot * 0.40, eff_strike * 0.40)), spot * 1.40
+        for _ in range(22):
             mid_s = 0.5 * (lo_s + hi_s)
-            val_m, _ = bs_put_price_delta(mid_s, eff_strike, T_out, eff_r, sigma_out)
+            val_m, _ = _bs_price_q(mid_s, eff_strike, T_out, eff_r, sigma_out, eff_q, False)
             if val_m * skew_mult < prem_entry:
                 hi_s = mid_s
             else:
@@ -5057,10 +5168,7 @@ def calculate_options_volatility_and_spread_telemetry(
     spot_at_hold = spot + (target_5d - spot) * pace_ratio
 
     # Strategy A: Naked OTM Option at Hold Day & IV Shift
-    if is_call:
-        naked_out_raw, _ = bs_call_price_delta(spot_at_hold, eff_strike, T_out, eff_r, sigma_out)
-    else:
-        naked_out_raw, _ = bs_put_price_delta(spot_at_hold, eff_strike, T_out, eff_r, sigma_out)
+    naked_out_raw, _ = _bs_price_q(spot_at_hold, eff_strike, T_out, eff_r, sigma_out, eff_q, is_call)
     naked_out_prem = max(0.02, round(naked_out_raw * skew_mult, 2))
     naked_profit_1k = round(contracts_naked * (naked_out_prem - prem_entry) * 100.0, 0)
     naked_roi_pct = round((naked_profit_1k / max(1.0, invested_naked)) * 100.0, 1)
@@ -5084,8 +5192,8 @@ def calculate_options_volatility_and_spread_telemetry(
     short_entry_live = None
     short_delta_live = None
 
-    if chain_df is not None and not chain_df.empty and "strike" in chain_df.columns:
-        side_df = chain_df[chain_df["side"].str.lower() == ("call" if is_call else "put")].copy()
+    if chain_df is not None and not chain_df.empty and "strike" in chain_df.columns and "side" in chain_df.columns:
+        side_df = chain_df[chain_df["side"].astype(str).str.lower() == ("call" if is_call else "put")].copy()
         if not side_df.empty:
             wing_cands = side_df[side_df["strike"] > eff_strike] if is_call else side_df[side_df["strike"] < eff_strike]
             if not wing_cands.empty:
@@ -5106,20 +5214,17 @@ def calculate_options_volatility_and_spread_telemetry(
                     short_leg_source = "OPRA Live Short Leg"
 
     sigma_short_out = max(0.08, sigma_short_in * (1.0 + (float(iv_shift_pct) / 100.0)))
-    if is_call:
-        short_in, short_delta = bs_call_price_delta(spot, short_strike, T_in, eff_r, sigma_short_in)
-        short_out, _ = bs_call_price_delta(spot_at_hold, short_strike, T_out, eff_r, sigma_short_out)
-        short_flat, _ = bs_call_price_delta(spot, short_strike, T_out, eff_r, sigma_short_in)
-    else:
-        short_in, short_delta = bs_put_price_delta(spot, short_strike, T_in, eff_r, sigma_short_in)
-        short_out, _ = bs_put_price_delta(spot_at_hold, short_strike, T_out, eff_r, sigma_short_out)
-        short_flat, _ = bs_put_price_delta(spot, short_strike, T_out, eff_r, sigma_short_in)
+    short_in, short_delta = _bs_price_q(spot, short_strike, T_in, eff_r, sigma_short_in, eff_q, is_call)
+    short_out, _ = _bs_price_q(spot_at_hold, short_strike, T_out, eff_r, sigma_short_out, eff_q, is_call)
+    short_flat, _ = _bs_price_q(spot, short_strike, T_out, eff_r, sigma_short_in, eff_q, is_call)
 
     if short_entry_live is not None and short_in > 0.05:
-        short_skew_mult = float(np.clip(short_entry_live / short_in, 0.65, 1.55))
         short_entry = min(prem_entry * 0.80, max(0.05, short_entry_live))
+        short_skew_mult = float(np.clip(short_entry / short_in, 0.65, 1.55))
     else:
         short_entry = min(prem_entry * 0.72, max(0.05, round(short_in * skew_mult, 2)))
+        if short_in > 0.05:
+            short_skew_mult = float(np.clip(short_entry / short_in, 0.65, 1.55))
 
     if short_delta_live is not None:
         short_delta = short_delta_live
@@ -5134,7 +5239,8 @@ def calculate_options_volatility_and_spread_telemetry(
     spread_profit_1k = round(spread_contracts * (spread_val_out - net_debit) * 100.0, 0)
     spread_roi_pct = round((spread_profit_1k / max(1.0, spread_invested)) * 100.0, 1)
     spread_theta_dollar = round(spread_contracts * (spread_val_flat - net_debit) * 100.0, 0)
-    theta_saved_dollar = round(abs(theta_hold_dollar) - abs(spread_theta_dollar), 0)
+    spread_theta_eq_notional = spread_theta_dollar * (invested_naked / max(1.0, spread_invested))
+    theta_saved_dollar = round(spread_theta_eq_notional - theta_hold_dollar, 0)
 
     prefer_spread = (iv_hv_spread >= 8.0) or (vol_rank >= 72.0) or (iv_shift_pct <= -5.0) or (spread_roi_pct > naked_roi_pct + 8.0)
     rec_structure = f"{eff_dte}D VERTICAL DEBIT SPREAD" if prefer_spread else f"{eff_dte}D NAKED OTM {direction}"
@@ -5152,12 +5258,8 @@ def calculate_options_volatility_and_spread_telemetry(
         row_cells = []
         for dc in day_cols:
             t_sc = max(1, eff_dte - dc) / 365.0
-            if is_call:
-                p_l_raw, _ = bs_call_price_delta(s_sc, eff_strike, t_sc, eff_r, sig_l_sc)
-                p_s_raw, _ = bs_call_price_delta(s_sc, short_strike, t_sc, eff_r, sig_s_sc)
-            else:
-                p_l_raw, _ = bs_put_price_delta(s_sc, eff_strike, t_sc, eff_r, sig_l_sc)
-                p_s_raw, _ = bs_put_price_delta(s_sc, short_strike, t_sc, eff_r, sig_s_sc)
+            p_l_raw, _ = _bs_price_q(s_sc, eff_strike, t_sc, eff_r, sig_l_sc, eff_q, is_call)
+            p_s_raw, _ = _bs_price_q(s_sc, short_strike, t_sc, eff_r, sig_s_sc, eff_q, is_call)
             n_val = max(0.01, p_l_raw * skew_mult)
             sp_val = min(spread_width, max(0.01, n_val - (p_s_raw * short_skew_mult)))
             n_roi = round(((n_val - prem_entry) / max(0.05, prem_entry)) * 100.0, 1)
@@ -5358,7 +5460,7 @@ def get_due_diligence_candidate(
 
     try:
         # Profile lookup BEFORE metric gating so thematic ETFs bypass corporate cap/fundamental gates cleanly
-        prof_cached = get_cached(f"profile_{json.dumps({'symbol': sym}, sort_keys=True)}", ttl=3600)
+        prof_cached = get_cached(_fmp_cache_key("profile", {"symbol": sym}), ttl=3600)
         if prof_cached is None and (vet_deep or sym in THEMATIC_ETFS):
             prof_cached = fmp_get("profile", params={"symbol": sym}, ttl=3600)
         prof = prof_cached[0] if (isinstance(prof_cached, list) and len(prof_cached) > 0) else {}
@@ -5494,7 +5596,7 @@ def get_due_diligence_candidate(
                 sym, spot=metrics["price"], primary_chain_df=chain_df, ttl=900
             )
         else:
-            opt_cached_k = f"live_opt_contract_v5_{sym}_{metrics.get('action', '')}_{round(rec_strike, 1)}_{delta_mode}"
+            opt_cached_k = f"live_opt_contract_v5_{sym}_{metrics.get('action', '')}_35_{delta_mode}_{round(rec_strike, 1)}"
             c_opt = get_cached(opt_cached_k, ttl=1800)
             if not (isinstance(c_opt, dict) and c_opt):
                 c_opt = get_cached(f"live_opt_contract_v4_{sym}_{metrics.get('action', '')}_{round(rec_strike, 1)}", ttl=1800)
@@ -5505,8 +5607,15 @@ def get_due_diligence_candidate(
 
         if opt_contract and isinstance(opt_contract, dict) and opt_contract.get("strike"):
             metrics["recommended_strike"] = float(opt_contract["strike"])
-            if opt_contract.get("delta"):
-                metrics["estimated_delta"] = round(abs(float(opt_contract["delta"])), 2)
+            if opt_contract.get("delta") is not None:
+                _d_raw = float(opt_contract["delta"])
+                _act_up = str(metrics.get("action", "")).upper()
+                if "PUT" in _act_up and _d_raw > 0:
+                    _d_raw = -abs(_d_raw)
+                elif "CALL" in _act_up and _d_raw < 0:
+                    _d_raw = abs(_d_raw)
+                metrics["signed_delta"] = round(_d_raw, 2)
+                metrics["estimated_delta"] = round(abs(_d_raw), 2)
 
         metrics["near_live_option"] = opt_contract
         metrics["extended_hours"] = ext_telemetry
@@ -5576,9 +5685,17 @@ def get_due_diligence_candidate(
         quant_edge = {}
         try:
             import quant_kernel
+            if "date" in t_df.columns and "date" in b_df.columns:
+                _k_aligned = pd.DataFrame({
+                    "t": pd.Series(t_df["close"].to_numpy(dtype=float), index=pd.to_datetime(t_df["date"]).dt.normalize()),
+                    "b": pd.Series(b_df["close"].to_numpy(dtype=float), index=pd.to_datetime(b_df["date"]).dt.normalize()),
+                })
+                _k_aligned = _k_aligned[~_k_aligned.index.duplicated(keep="last")].dropna()
+            else:
+                _k_aligned = pd.DataFrame({"t": t_df["close"], "b": b_df["close"]}).dropna()
             k_res = quant_kernel.kalman_dynamic_beta_and_z(
-                t_df["close"].to_numpy(dtype=float),
-                b_df["close"].to_numpy(dtype=float)
+                _k_aligned["t"].to_numpy(dtype=float),
+                _k_aligned["b"].to_numpy(dtype=float),
             )
             ev_res = quant_kernel.compute_institutional_ev_and_kelly(
                 metrics=metrics,
@@ -5652,6 +5769,7 @@ def get_due_diligence_candidate(
             "conviction_score_200": conv_200["conviction_score_200"],
             "conviction_abs_200": conv_200["conviction_abs_200"],
             "composite_score": conv_200["composite_score"],
+            "move_score": conv_200["composite_score"],
             "conviction_tier": conv_200["conviction_tier"],
             "recommended_dte": conv_200["recommended_dte"],
             "dte_rationale": conv_200["dte_rationale"],
@@ -5829,6 +5947,25 @@ def get_ranked_sector_candidates(
     eligible_pool = _apply_vetted_and_quotes(eligible_pool)
     disqualified_pool = _apply_vetted_and_quotes(disqualified_pool)
     quarantine_pool = _apply_vetted_and_quotes(quarantine_pool)
+
+    # Re-partition after Stage-2 deep vetting: fresh /earnings or bad-data flags discovered in Stage 2
+    # must demote <=15d earnings equities into disqualified_pool before selecting Top 5.
+    still_eligible: List[Dict[str, Any]] = []
+    for c in eligible_pool:
+        m_c = c.get("metrics", {})
+        c_is_etf = bool(c.get("is_etf") or m_c.get("is_etf"))
+        c_days_er = int(m_c.get("days_to_earnings", 45) if m_c.get("days_to_earnings") is not None else 45)
+        if bool(m_c.get("is_bad_data", False)):
+            quarantine_pool.append(c)
+        elif (not c_is_etf) and (0 <= c_days_er <= 15):
+            c["disqualified_top5_earnings"] = True
+            c["disqualified_reason"] = f"Binary Earnings in {c_days_er}d ({m_c.get('earnings_date', '')})"
+            m_c["disqualified_top5_earnings"] = True
+            m_c["disqualified_reason"] = c["disqualified_reason"]
+            disqualified_pool.append(c)
+        else:
+            still_eligible.append(c)
+    eligible_pool = still_eligible
 
     # Re-sort eligible_pool AFTER Stage-2 deep vetting so zombies/weak setups drop out of Top 5
     # and clean alternates (#6-#8) are promoted into top5_recommended
@@ -6227,7 +6364,7 @@ def _quote_rvol(sym: str, q: Dict[str, Any], default_20d_vol: float = 50_000_000
             return 1.0
         # Check if EOD history is already in local cache for exact 20D median volume
         base_vol = default_20d_vol
-        eod_cached = get_cached(f"historical-price-eod/full_{json.dumps({'symbol': sym}, sort_keys=True)}", ttl=7200)
+        eod_cached = get_cached(_fmp_cache_key("historical-price-eod/full", {"symbol": sym}), ttl=7200)
         if isinstance(eod_cached, list) and len(eod_cached) >= 15:
             vols = [float(r.get("volume") or 0.0) for r in eod_cached[:21] if float(r.get("volume") or 0.0) > 0]
             if len(vols) >= 10:
@@ -6827,7 +6964,7 @@ def get_cross_asset_rotation_compass_data() -> Dict[str, Any]:
         })
 
     node_by_sym = {n["symbol"]: n for n in nodes}
-    risk_syms = ["SPY", "QQQ", "IWM", "HYG", "SMH", "IGV", "BTCUSD"]
+    risk_syms = ["SPY", "QQQ", "IWM", "HYG", "SMH", "SRVR", "BTCUSD"]
     haven_syms = ["TLT", "GLD", "UUP"]
 
     risk_thrust = float(np.mean([node_by_sym[s]["y_now"] for s in risk_syms if s in node_by_sym])) if nodes else 0.0
@@ -7126,8 +7263,8 @@ def get_unified_5day_catalyst_outlook(
         for esym, edata in earnings_map.items():
             if esym not in tracked_universe:
                 continue
-            edate = str((edata or {}).get("date") or "")[:10]
-            if edate:
+            edate = str((edata or {}).get("earnings_date") or (edata or {}).get("date") or "")[:10]
+            if len(edate) == 10 and edate != "ETF Basket":
                 events_by_date.setdefault(edate, []).append({
                     "type": "EARNINGS",
                     "title": f"{esym} Earnings ({str((edata or {}).get('time') or 'TBD').upper()})",

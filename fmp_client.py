@@ -1,5 +1,8 @@
 import os
+import re
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 import rubberband_engine_v3 as rbe3
@@ -10,6 +13,22 @@ load_dotenv()
 FMP_STABLE_URL = "https://financialmodelingprep.com/stable"
 FMP_V3_URL = "https://financialmodelingprep.com/api/v3"
 
+_FMP_SESSION = requests.Session()
+_FMP_RETRY = Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],
+    respect_retry_after_header=True,
+)
+_FMP_ADAPTER = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=_FMP_RETRY)
+_FMP_SESSION.mount("https://", _FMP_ADAPTER)
+_FMP_SESSION.mount("http://", _FMP_ADAPTER)
+
+
+def _redact_api_key(msg: str) -> str:
+    return re.sub(r"([?&]apikey=)[^&\s'\"]+", r"\1[REDACTED]", str(msg or ""), flags=re.IGNORECASE)
+
 
 def get_fmp_api_key() -> str:
     return os.getenv("FMP_API_KEY", "").strip()
@@ -19,18 +38,21 @@ def _make_fmp_request(endpoint: str, params: Optional[Dict[str, Any]] = None) ->
     """Routes FMP requests through rubberband_engine_v3's shared high-speed TTL cache."""
     data = rbe3.fmp_get(endpoint, params=params, use_cache=True)
     if isinstance(data, dict) and "error" in data:
-        # Fallback to v3 URL if needed
+        # Legacy v3 path fallback (only for endpoints using path-segment symbol)
         api_key = get_fmp_api_key()
         if not api_key:
-            return data
+            return {"error": _redact_api_key(data.get("error", ""))}
         p = dict(params or {})
+        sym = str(p.pop("symbol", "") or "").strip().upper()
         p["apikey"] = api_key
+        v3_url = f"{FMP_V3_URL}/{endpoint}/{sym}" if sym else f"{FMP_V3_URL}/{endpoint}"
         try:
-            r = requests.get(f"{FMP_V3_URL}/{endpoint}", params=p, timeout=12)
+            r = _FMP_SESSION.get(v3_url, params=p, timeout=(5, 12))
             if r.status_code == 200:
                 return r.json()
         except Exception:
             pass
+        return {"error": _redact_api_key(data.get("error", ""))}
     return data
 
 

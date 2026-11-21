@@ -1,4 +1,4 @@
-import importlib
+import os
 import streamlit as st
 from PIL import Image
 import styles
@@ -9,12 +9,11 @@ try:
 except Exception:
     ui_navigation = None
 
-importlib.reload(styles)
-if ui_navigation is not None:
-    importlib.reload(ui_navigation)
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ICON_PATH = os.path.join(_APP_ROOT, "spline_pointer.png")
 
 try:
-    _page_icon_img = Image.open("spline_pointer.png")
+    _page_icon_img = Image.open(_ICON_PATH) if os.path.exists(_ICON_PATH) else None
 except Exception:
     _page_icon_img = None
 
@@ -36,8 +35,6 @@ elif _pending_view == "Charles Schwab Practice Desk & Diary":
 
 # Inject Obsidian Frosted-Glass + Hyper-Orange CSS
 st.markdown(styles.get_custom_css(), unsafe_allow_html=True)
-if ui_navigation is not None and hasattr(ui_navigation, "render_sidebar_grabber"):
-    ui_navigation.render_sidebar_grabber()
 
 with st.sidebar:
     st.markdown("""

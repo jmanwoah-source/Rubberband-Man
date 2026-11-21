@@ -135,30 +135,36 @@ def get_gemini_client() -> Tuple[Optional[Any], str]:
     if not api_key:
         return None, "GEMINI_API_KEY is not set. Please set it in your .env file or sidebar."
     try:
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=45000))
         return client, ""
     except Exception as e:
         return None, f"Failed to initialize Gemini Client: {str(e)}"
 
 
 class FinancialAgentSession:
-    def __init__(self, model_name: str = "gemini-3.5-flash-lite"):
-        self.model_name = model_name
+    def __init__(self, model_name: Optional[str] = None):
+        self.model_name = model_name or llm_router.get_gemini_fallback_models()[0]
         self.tool_logs: List[Dict[str, Any]] = []
 
     def _tool_execution_wrapper(self, func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             tool_name = func.__name__
-            self.tool_logs.append({
+            entry: Dict[str, Any] = {
                 "name": tool_name,
                 "args": kwargs if kwargs else (args if args else {}),
-                "status": "invoking"
-            })
-            result = func(*args, **kwargs)
-            self.tool_logs[-1]["status"] = "success"
-            self.tool_logs[-1]["result_summary"] = str(result)[:200]
-            return result
+                "status": "invoking",
+            }
+            self.tool_logs.append(entry)
+            try:
+                result = func(*args, **kwargs)
+                entry["status"] = "success"
+                entry["result_summary"] = str(result)[:200]
+                return result
+            except Exception as exc:
+                entry["status"] = "error"
+                entry["result_summary"] = str(exc)[:200]
+                raise
         return wrapper
 
     def query(self, prompt: str, chat_history: List[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -184,7 +190,7 @@ class FinancialAgentSession:
         )
 
         fallback_models = [self.model_name]
-        for fallback in ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+        for fallback in llm_router.get_gemini_fallback_models():
             if fallback not in fallback_models:
                 fallback_models.append(fallback)
 
@@ -197,6 +203,7 @@ class FinancialAgentSession:
         last_exception = None
         for model in fallback_models:
             for attempt in range(3):
+                self.tool_logs = []
                 try:
                     chat = client.chats.create(
                         model=model,
@@ -213,11 +220,16 @@ class FinancialAgentSession:
                 except Exception as e:
                     last_exception = e
                     err_str = str(e)
-                    if any(k in err_str.upper() for k in ["503", "500", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "HIGH DEMAND"]):
+                    if any(k in err_str.upper() for k in ["401", "403", "API_KEY_INVALID", "PERMISSION_DENIED"]):
+                        return {
+                            "text": f"❌ **Gemini Authorization Error**: {err_str[:180]}",
+                            "tool_logs": self.tool_logs,
+                            "chart_data": None
+                        }
+                    if any(k in err_str.upper() for k in ["503", "500", "502", "504", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "HIGH DEMAND", "TIMEOUT"]):
                         time.sleep(1.0 * (attempt + 1))
                         continue
-                    else:
-                        break
+                    break
 
         return {
             "text": f"❌ **Service High Demand**: ({str(last_exception)}). Please retry.",
@@ -232,14 +244,27 @@ class FinancialAgentSession:
         """
         self.tool_logs = []
 
-        candidates = set(re.findall(r'\b[A-Za-z]{2,5}\b', prompt))
+        target_tickers: List[str] = []
+        ctx_match = re.search(r"\[Ticker:\s*([A-Za-z]{1,5})\b", prompt)
+        if ctx_match:
+            target_tickers.append(ctx_match.group(1).upper())
+
+        candidates = re.findall(r'\b[A-Za-z]{1,5}\b', prompt)
         ignore = {
             "CALL", "PUTS", "PUT", "CALLS", "ATM", "OTM", "ITM", "ROI", "DTE",
             "RVOL", "DMA", "RSI", "SMA", "FCF", "USD", "SPY", "QQQ", "BUY", "SELL",
             "THE", "FOR", "AND", "CAN", "WHAT", "SHOW", "GIVE", "WITH", "RISK",
-            "BOND", "GOLD", "NEXT", "MOVE", "DAYS", "HIGH", "LOW", "BEST"
+            "BOND", "GOLD", "NEXT", "MOVE", "DAYS", "HIGH", "LOW", "BEST",
+            "AI", "US", "ETF", "EPS", "IV", "SEC", "FED", "CPI", "GDP", "GEX",
+            "VRP", "SVI", "VIX", "EV", "PNL", "CEO", "CFO", "IPO", "OPEX", "FOMC",
+            "IS", "IT", "IN", "ON", "AT", "TO", "OF", "OR", "AS", "BY", "BE", "DO",
+            "IF", "NO", "SO", "UP", "MY", "AN", "WE", "HE", "ME", "VS", "WHY", "HOW",
+            "A", "I",
         }
-        target_tickers = [c.upper() for c in candidates if c.upper() not in ignore and c.isupper()]
+        for c in candidates:
+            cu = c.upper()
+            if c.isupper() and cu not in ignore and cu not in target_tickers:
+                target_tickers.append(cu)
         if not target_tickers:
             target_tickers = ["MPWR"]
 

@@ -6,13 +6,25 @@ and Cloud Google Gemini 2.5 Flash with intelligent auto-discovery and failover.
 """
 
 import os
-import json
 import time
 from typing import Dict, Any, Tuple, Optional, List
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+DEFAULT_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+
+
+def get_gemini_fallback_models() -> List[str]:
+    env_model = os.getenv("GEMINI_MODEL", "").strip()
+    models: List[str] = []
+    if env_model:
+        models.append(env_model)
+    for m in DEFAULT_GEMINI_MODELS:
+        if m not in models:
+            models.append(m)
+    return models
 
 
 def get_active_backend() -> str:
@@ -36,12 +48,32 @@ def get_local_config() -> Dict[str, str]:
     """Returns local ASUS GX10 model server configuration."""
     raw_url = os.getenv("LOCAL_LLM_URL", "http://localhost:11434/v1").strip()
     url = normalize_endpoint_url(raw_url)
-    model = os.getenv("LOCAL_LLM_MODEL", "qwen3.8:latest").strip()
+    model = os.getenv("LOCAL_LLM_MODEL", "qwen2.5:3b").strip()
     api_key = os.getenv("LOCAL_LLM_API_KEY", "ollama").strip()
     return {"url": url, "model": model, "api_key": api_key}
 
 
-def fetch_available_models(endpoint_url: str = None) -> List[str]:
+def _local_auth_headers(api_key: str) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _sort_models_qwen_first(models: List[str]) -> List[str]:
+    def _qwen_sort_key(name: str):
+        nl = name.lower()
+        if "qwen3.8" in nl or "qwen-3.8" in nl:
+            return (0, nl)
+        if "qwen3" in nl:
+            return (1, nl)
+        if "qwen" in nl:
+            return (2, nl)
+        return (3, nl)
+    return sorted(models, key=_qwen_sort_key)
+
+
+def fetch_available_models(endpoint_url: Optional[str] = None, api_key: Optional[str] = None) -> List[str]:
     """
     Auto-discovers and queries installed models from local Ollama / vLLM / SGLang / LM Studio.
     Supports both OpenAI /v1/models and native Ollama /api/tags.
@@ -51,11 +83,12 @@ def fetch_available_models(endpoint_url: str = None) -> List[str]:
     raw_url = (endpoint_url or cfg["url"]).strip().rstrip("/")
     base_url = raw_url[:-3] if raw_url.endswith("/v1") else raw_url
     v1_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
+    headers = _local_auth_headers(api_key if api_key is not None else cfg["api_key"])
 
-    models = []
+    models: List[str] = []
     # 1. Try Ollama native /api/tags
     try:
-        r = requests.get(f"{base_url}/api/tags", timeout=2.5)
+        r = requests.get(f"{base_url}/api/tags", headers=headers, timeout=2.5)
         if r.status_code == 200:
             data = r.json()
             if "models" in data and isinstance(data["models"], list):
@@ -69,7 +102,7 @@ def fetch_available_models(endpoint_url: str = None) -> List[str]:
     # 2. Try OpenAI /v1/models (vLLM, SGLang, LM Studio, Ollama /v1)
     if not models:
         try:
-            r = requests.get(f"{v1_url}/models", timeout=2.5)
+            r = requests.get(f"{v1_url}/models", headers=headers, timeout=2.5)
             if r.status_code == 200:
                 data = r.json()
                 if "data" in data and isinstance(data["data"], list):
@@ -80,39 +113,43 @@ def fetch_available_models(endpoint_url: str = None) -> List[str]:
         except Exception:
             pass
 
-    def _qwen_sort_key(name: str):
-        nl = name.lower()
-        if "qwen3.8" in nl or "qwen-3.8" in nl:
-            return (0, nl)
-        if "qwen3" in nl:
-            return (1, nl)
-        if "qwen" in nl:
-            return (2, nl)
-        return (3, nl)
-
-    return sorted(models, key=_qwen_sort_key)
+    return _sort_models_qwen_first(models)
 
 
-def test_local_connection(endpoint_url: str = None, model_name: str = None) -> Tuple[bool, str, float]:
+def test_local_connection(
+    endpoint_url: Optional[str] = None,
+    model_name: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Tuple[bool, str, float]:
     """
     Pings local or LAN ASUS GX10 OpenAI-compatible endpoint (Ollama, vLLM, LM Studio)
-    to check connectivity and latency.
+    to check connectivity and latency without double-fetching /models.
     """
     cfg = get_local_config()
     url = normalize_endpoint_url(endpoint_url or cfg["url"])
+    headers = _local_auth_headers(api_key if api_key is not None else cfg["api_key"])
 
     t0 = time.time()
     try:
         models_url = f"{url}/models"
-        resp = requests.get(models_url, timeout=3.0)
+        resp = requests.get(models_url, headers=headers, timeout=3.0)
         latency_ms = (time.time() - t0) * 1000.0
 
         if resp.status_code == 200:
-            available = fetch_available_models(url)
+            available: List[str] = []
+            try:
+                data = resp.json()
+                if isinstance(data, dict) and isinstance(data.get("data"), list):
+                    for m in data["data"]:
+                        mid = m.get("id")
+                        if mid and mid not in available:
+                            available.append(mid)
+                    available = _sort_models_qwen_first(available)
+            except Exception:
+                available = []
             model_info = f" ({len(available)} model(s) found: {', '.join(available[:3])})" if available else ""
             return True, f"GX10 Online · {latency_ms:.0f}ms latency{model_info}", latency_ms
-        else:
-            return False, f"HTTP {resp.status_code} from {url}", 0.0
+        return False, f"HTTP {resp.status_code} from {url}", 0.0
     except requests.exceptions.ConnectionError:
         return False, f"Connection refused at {url}. Ensure Qwen 3.8 (Ollama/vLLM) is active on GX10.", 0.0
     except requests.exceptions.Timeout:
@@ -122,27 +159,29 @@ def test_local_connection(endpoint_url: str = None, model_name: str = None) -> T
 
 
 def test_gemini_connection() -> Tuple[bool, str]:
-    """Verifies Gemini API Key."""
+    """Verifies Gemini API Key against valid Gemini 2.5 Flash."""
     key = os.getenv("GEMINI_API_KEY", "").strip()
     if not key:
         return False, "GEMINI_API_KEY is missing."
     try:
         from google import genai
-        client = genai.Client(api_key=key)
-        client.models.get(model="gemini-3.5-flash-lite")
-        return True, "Online (Google Gemini 3.5 Flash Lite API)"
+        from google.genai import types
+        target_model = get_gemini_fallback_models()[0]
+        client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=15000))
+        client.models.get(model=target_model)
+        return True, f"Online ({target_model})"
     except Exception as e:
         err = str(e)
-        if "API_KEY_INVALID" in err or "400" in err:
-            return False, "Invalid API Key"
-        return True, f"Configured (Verification: {err[:50]})"
+        if "API_KEY_INVALID" in err or "401" in err or "403" in err:
+            return False, "Invalid or unauthorized Gemini API Key."
+        return False, f"Connection failed: {err[:80]}"
 
 
 def generate_text(prompt: str, system_instruction: str = "", temperature: float = 0.2) -> Tuple[str, str]:
     """
     Unified text generation router.
     Targets ASUS GX10 Qwen 3.8 when backend == 'local', with automatic fallback to
-    discovered Qwen model or Cloud Gemini 3.5 Flash Lite if local daemon is temporarily unreachable.
+    Cloud Gemini 2.5 if local daemon is temporarily unreachable and GEMINI_API_KEY is set.
     """
     backend = get_active_backend()
 
@@ -150,25 +189,21 @@ def generate_text(prompt: str, system_instruction: str = "", temperature: float 
         text, err = _generate_local(prompt, system_instruction, temperature)
         if text:
             return text, ""
-        # Automatic resilience fallback to Gemini if GEMINI_API_KEY is available and local node is offline
         if os.getenv("GEMINI_API_KEY", "").strip():
-            g_text, g_err = _generate_gemini(prompt, system_instruction, temperature)
+            g_text, _ = _generate_gemini(prompt, system_instruction, temperature)
             if g_text:
-                return f"*(⚡ GX10 Local Node Offline — Auto-Routed via Gemini 3.5 Flash Lite Standby)*\n\n{g_text}", ""
+                return f"*(⚡ GX10 Local Node Offline — Auto-Routed via Cloud Gemini Standby)*\n\n{g_text}", ""
         return "", err
-    else:
-        return _generate_gemini(prompt, system_instruction, temperature)
+    return _generate_gemini(prompt, system_instruction, temperature)
 
 
 def _generate_local(prompt: str, system_instruction: str, temperature: float) -> Tuple[str, str]:
-    """Calls local ASUS GX10 OpenAI-compatible endpoint (Ollama, vLLM, SGLang) for Qwen 3.8."""
+    """Calls local ASUS GX10 OpenAI-compatible endpoint (Ollama, vLLM, SGLang)."""
     cfg = get_local_config()
     chat_url = f"{cfg['url']}/chat/completions"
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {cfg['api_key']}"
-    }
+    headers = {"Content-Type": "application/json"}
+    headers.update(_local_auth_headers(cfg["api_key"]))
 
     messages = []
     if system_instruction:
@@ -182,25 +217,25 @@ def _generate_local(prompt: str, system_instruction: str, temperature: float) ->
             "model": target_model,
             "messages": messages,
             "temperature": temperature,
-            "stream": False
+            "stream": False,
         }
         try:
-            resp = requests.post(chat_url, headers=headers, json=payload, timeout=95.0)
+            resp = requests.post(chat_url, headers=headers, json=payload, timeout=(5.0, 95.0))
             if resp.status_code == 200:
                 data = resp.json()
                 choices = data.get("choices", [])
-                if choices and "message" in choices[0]:
-                    content = choices[0]["message"].get("content", "")
-                    return content.strip(), ""
-                return "No content returned by local Qwen 3.8 model.", ""
-            elif resp.status_code == 404 and attempt == 0:
-                available = fetch_available_models(cfg["url"])
+                if choices and isinstance(choices[0], dict) and "message" in choices[0]:
+                    content = str(choices[0]["message"].get("content") or "").strip()
+                    if content:
+                        return content, ""
+                return "", "Empty content returned by local model."
+            if resp.status_code == 404 and attempt == 0:
+                available = fetch_available_models(cfg["url"], api_key=cfg["api_key"])
                 if available:
                     target_model = available[0]
                     continue
                 return "", f"Model '{cfg['model']}' not found at {cfg['url']} (HTTP 404)."
-            else:
-                return "", f"Local GX10 model error HTTP {resp.status_code}: {resp.text[:200]}"
+            return "", f"Local GX10 model error HTTP {resp.status_code}: {resp.text[:200]}"
         except requests.exceptions.ConnectionError:
             return "", f"Failed to connect to ASUS GX10 endpoint at {cfg['url']}. Ensure Ollama/vLLM is running with '{cfg['model']}'."
         except requests.exceptions.Timeout:
@@ -211,8 +246,18 @@ def _generate_local(prompt: str, system_instruction: str, temperature: float) ->
     return "", "Local model generation failed."
 
 
+def _is_transient_gemini_error(err_str: str) -> bool:
+    u = err_str.upper()
+    return any(tok in u for tok in ("429", "500", "502", "503", "504", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "TIMEOUT"))
+
+
+def _is_auth_gemini_error(err_str: str) -> bool:
+    u = err_str.upper()
+    return any(tok in u for tok in ("401", "403", "API_KEY_INVALID", "PERMISSION_DENIED", "UNAUTHENTICATED"))
+
+
 def _generate_gemini(prompt: str, system_instruction: str, temperature: float) -> Tuple[str, str]:
-    """Calls Google Gemini API with fallback cascade."""
+    """Calls Google Gemini API with smart transient-only retry & model fallback cascade."""
     key = os.getenv("GEMINI_API_KEY", "").strip()
     if not key:
         return "", "GEMINI_API_KEY is not configured."
@@ -220,15 +265,15 @@ def _generate_gemini(prompt: str, system_instruction: str, temperature: float) -
     try:
         from google import genai
         from google.genai import types
-        client = genai.Client(api_key=key)
+        client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=45000))
 
         config = types.GenerateContentConfig(
             system_instruction=system_instruction if system_instruction else None,
-            temperature=temperature
+            temperature=temperature,
         )
 
-        fallback_models = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
-        last_err = None
+        fallback_models = get_gemini_fallback_models()
+        last_err: Optional[Exception] = None
 
         for model in fallback_models:
             for attempt in range(2):
@@ -236,14 +281,20 @@ def _generate_gemini(prompt: str, system_instruction: str, temperature: float) -
                     response = client.models.generate_content(
                         model=model,
                         contents=prompt,
-                        config=config
+                        config=config,
                     )
                     if response and response.text:
                         return response.text.strip(), ""
                 except Exception as e:
                     last_err = e
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
+                    err_str = str(e)
+                    if _is_auth_gemini_error(err_str):
+                        return "", f"Gemini authorization error: {err_str[:160]}"
+                    if _is_transient_gemini_error(err_str):
+                        time.sleep(0.6 * (attempt + 1))
+                        continue
+                    # 404 / NOT_FOUND / bad model name -> immediately move to next model
+                    break
         return "", f"Gemini API failure across models: {str(last_err)}"
     except Exception as e:
         return "", f"Gemini client initialization error: {str(e)}"

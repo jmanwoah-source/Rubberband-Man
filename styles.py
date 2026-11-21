@@ -111,9 +111,8 @@ def get_custom_css() -> str:
         pointer-events: none !important;
     }
 
-    /* Suppress Unwanted Streamlit Chrome */
+    /* Suppress Unwanted Streamlit Chrome (preserve stStatusWidget for live connection status) */
     div[data-testid="stDecoration"],
-    div[data-testid="stStatusWidget"],
     .stDeployButton,
     .stAppDeployButton,
     [data-testid="stHeaderActionElements"],
@@ -1057,8 +1056,8 @@ def get_custom_css() -> str:
     /* ========================================================= */
     /* TACTILE GLASS BUTTONS & HYPER-ORANGE PRIMARY CTAs         */
     /* ========================================================= */
-    button,
     .stButton > button,
+    [data-testid="stBaseButton-secondary"],
     [data-testid="baseButton-secondary"] {
         background: rgba(255, 255, 255, 0.04) !important;
         backdrop-filter: blur(16px) !important;
@@ -1075,8 +1074,8 @@ def get_custom_css() -> str:
         cursor: pointer !important;
         outline: none !important;
     }
-    button:hover,
     .stButton > button:hover,
+    [data-testid="stBaseButton-secondary"]:hover,
     [data-testid="baseButton-secondary"]:hover {
         background: rgba(255, 107, 0, 0.12) !important;
         color: #F8FAFC !important;
@@ -1084,14 +1083,15 @@ def get_custom_css() -> str:
         transform: translateY(-1px) !important;
         box-shadow: 0 6px 18px rgba(0, 0, 0, 0.48), 0 0 14px -2px rgba(255, 107, 0, 0.24) !important;
     }
-    button:active,
     .stButton > button:active,
+    [data-testid="stBaseButton-secondary"]:active,
     [data-testid="baseButton-secondary"]:active {
         transform: scale(0.95) !important;
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55) !important;
     }
 
     /* Primary CTA Button - Rich Hyper-Orange Gradient (#FF6B00 -> #FF8533) */
+    [data-testid="stBaseButton-primary"],
     [data-testid="baseButton-primary"],
     .stButton > button[kind="primary"],
     button[kind="primary"] {
@@ -1102,12 +1102,14 @@ def get_custom_css() -> str:
         font-weight: 800 !important;
         box-shadow: var(--rm-shadow-orange) !important;
     }
+    [data-testid="stBaseButton-primary"] p,
     [data-testid="baseButton-primary"] p,
     .stButton > button[kind="primary"] p,
     button[kind="primary"] p {
         color: #090B0F !important;
         font-weight: 800 !important;
     }
+    [data-testid="stBaseButton-primary"]:hover,
     [data-testid="baseButton-primary"]:hover,
     .stButton > button[kind="primary"]:hover,
     button[kind="primary"]:hover {
@@ -1117,6 +1119,7 @@ def get_custom_css() -> str:
         box-shadow: 0 8px 28px -2px rgba(255, 107, 0, 0.55), 0 0 18px rgba(255, 133, 51, 0.35) !important;
         transform: translateY(-1px) !important;
     }
+    [data-testid="stBaseButton-primary"]:active,
     [data-testid="baseButton-primary"]:active,
     .stButton > button[kind="primary"]:active,
     button[kind="primary"]:active {
@@ -1186,7 +1189,7 @@ def get_custom_css() -> str:
     }
 
     /* ========================================================= */
-    /* TOOLTIP ISOLATION (Zero Double Border)                    */
+    /* TOOLTIP ISOLATION (Instant Obsidian Tooltip, No Fade Trap)*/
     /* ========================================================= */
     div[data-baseweb="popover"],
     [data-baseweb="popover"],
@@ -1198,10 +1201,6 @@ def get_custom_css() -> str:
         margin: 0 !important;
         outline: none !important;
         z-index: 999999 !important;
-        animation: tooltipPauseAndReveal 0.22s cubic-bezier(0.16, 1, 0.3, 1) 1.15s forwards !important;
-        opacity: 0 !important;
-        visibility: hidden !important;
-        pointer-events: none !important;
     }
     div[data-baseweb="popover"] > div,
     [data-baseweb="popover"] > div {
@@ -1210,11 +1209,6 @@ def get_custom_css() -> str:
         box-shadow: none !important;
         padding: 0 !important;
         margin: 0 !important;
-    }
-    div[data-baseweb="popover"] svg,
-    [data-baseweb="popover"] svg,
-    div[data-baseweb="popover"] [role="presentation"] {
-        display: none !important;
     }
     div[data-testid="stTooltipContent"],
     div[role="tooltip"],
@@ -1230,10 +1224,9 @@ def get_custom_css() -> str:
         line-height: 1.55 !important;
         padding: 12px 16px !important;
         max-width: 440px !important;
-        animation: tooltipPauseAndReveal 0.22s cubic-bezier(0.16, 1, 0.3, 1) 1.15s forwards !important;
-        opacity: 0 !important;
-        visibility: hidden !important;
-        pointer-events: none !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        pointer-events: auto !important;
     }
     div[data-testid="stTooltipContent"] > div,
     div[role="tooltip"] > div,
@@ -1246,11 +1239,6 @@ def get_custom_css() -> str:
         opacity: 1 !important;
         visibility: visible !important;
         pointer-events: auto !important;
-    }
-    @keyframes tooltipPauseAndReveal {
-        0% { opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(4px); }
-        99% { opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(4px); }
-        100% { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0); }
     }
     div[data-testid="stTooltipContent"] p,
     div[role="tooltip"] p {
@@ -1844,9 +1832,7 @@ def get_custom_css() -> str:
         width: 100%;
     }
 
-    .st-key-rm_mobile_bottom_dock,
-    [data-testid="stVerticalBlock"]:has(> div > div > .st-key-dock_btn_scanner),
-    div:has(> div > div > .st-key-dock_btn_scanner) {
+    .st-key-rm_mobile_bottom_dock {
         position: fixed !important;
         bottom: 14px !important;
         left: 50% !important;
@@ -1860,25 +1846,39 @@ def get_custom_css() -> str:
         border: 1px solid rgba(255, 255, 255, 0.12) !important;
         border-top: 1px solid rgba(255, 107, 0, 0.35) !important;
         border-radius: 9999px !important;
-        padding: 6px 10px !important;
+        padding: 6px 10px max(6px, env(safe-area-inset-bottom)) 10px !important;
         box-shadow: 0 16px 40px rgba(0, 0, 0, 0.85), 0 0 22px -4px rgba(255, 107, 0, 0.22) !important;
+    }
+    .st-key-rm_mobile_bottom_dock [data-testid="stHorizontalBlock"] {
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        gap: 6px !important;
+    }
+    .st-key-rm_mobile_bottom_dock [data-testid="stColumn"],
+    .st-key-rm_mobile_bottom_dock [data-testid="column"] {
+        flex: 1 1 0% !important;
+        width: 0 !important;
+        min-width: 0 !important;
     }
     .st-key-dock_btn_scanner button,
     .st-key-dock_btn_schwab button,
     .st-key-dock_btn_ledger button,
     .st-key-dock_btn_pro_mode button {
         border-radius: 9999px !important;
-        font-size: 0.74rem !important;
+        font-size: 0.71rem !important;
         font-weight: 800 !important;
-        padding: 4px 6px !important;
-        min-height: 38px !important;
-        height: 38px !important;
+        padding: 2px 4px !important;
+        min-height: 44px !important;
+        height: 44px !important;
         white-space: nowrap !important;
     }
 
     @media (max-width: 768px) {
+        section[data-testid="stMain"] [data-testid="stMainBlockContainer"],
         [data-testid="stAppViewContainer"] > .main {
-            padding: 8px 10px 92px 10px !important;
+            padding: 8px 10px calc(92px + env(safe-area-inset-bottom)) 10px !important;
         }
         .rm-hud-bar { padding: 10px 12px !important; border-radius: 12px !important; gap: 8px !important; }
         .rm-hud-title { font-size: 1.05rem !important; }
@@ -1886,8 +1886,10 @@ def get_custom_css() -> str:
         .hud-pill { padding: 3px 8px !important; font-size: 0.70rem !important; }
         .rm-card { padding: 14px 16px !important; margin-bottom: 12px !important; }
         .rm-card-value { font-size: 1.45rem !important; }
+        button[data-testid="stBaseButton-primary"],
+        button[data-testid="stBaseButton-secondary"],
         button[data-testid="baseButton-primary"],
-        button[data-testid="baseButton-secondary"] { min-height: 42px !important; }
+        button[data-testid="baseButton-secondary"] { min-height: 44px !important; }
     }
 
     /* ========================================================= */
@@ -2548,6 +2550,129 @@ def get_custom_css() -> str:
         background: rgba(255, 255, 255, 0.82) !important;
         box-shadow: 0 0 12px 2px var(--rm-liq-glow) !important;
         z-index: 3 !important;
+    }
+
+    /* ========================================================= */
+    /* PROGRESSIVE EDUCATIONAL DRAWERS (LEARN MODE)              */
+    /* ========================================================= */
+    details.rm-edu-drawer {
+        background: rgba(13, 17, 25, 0.72) !important;
+        backdrop-filter: blur(16px) !important;
+        -webkit-backdrop-filter: blur(16px) !important;
+        border: 1px solid rgba(56, 189, 248, 0.20) !important;
+        border-radius: 12px !important;
+        padding: 0 !important;
+        margin: 8px 0 14px 0 !important;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease !important;
+    }
+    details.rm-edu-drawer.rm-edu-compact {
+        margin: 6px 0 10px 0 !important;
+    }
+    details.rm-edu-drawer:hover,
+    details.rm-edu-drawer[open] {
+        border-color: rgba(56, 189, 248, 0.42) !important;
+        box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.65), 0 0 14px -4px rgba(56, 189, 248, 0.16) !important;
+    }
+    details.rm-edu-drawer > summary {
+        list-style: none !important;
+        cursor: pointer !important;
+        padding: 9px 14px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: 10px !important;
+        flex-wrap: wrap !important;
+        user-select: none !important;
+    }
+    details.rm-edu-drawer > summary::-webkit-details-marker {
+        display: none !important;
+    }
+    .rm-edu-summary-left {
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+    }
+    .rm-edu-pill {
+        background: rgba(56, 189, 248, 0.14) !important;
+        color: #38BDF8 !important;
+        border: 1px solid rgba(56, 189, 248, 0.35) !important;
+        border-radius: 9999px !important;
+        font-size: 0.66rem !important;
+        font-weight: 800 !important;
+        letter-spacing: 0.05em !important;
+        padding: 2px 8px !important;
+        white-space: nowrap !important;
+    }
+    .rm-edu-title {
+        color: #E2E8F0 !important;
+        font-size: 0.79rem !important;
+        font-weight: 700 !important;
+    }
+    .rm-edu-live {
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 0.70rem !important;
+        color: #94A3B8 !important;
+        font-variant-numeric: tabular-nums !important;
+    }
+    .rm-edu-body {
+        border-top: 1px solid rgba(255, 255, 255, 0.06) !important;
+        padding: 12px 14px 13px 14px !important;
+    }
+    .rm-edu-grid {
+        display: grid !important;
+        grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+        gap: 10px !important;
+    }
+    @media (max-width: 820px) {
+        .rm-edu-grid {
+            grid-template-columns: 1fr !important;
+        }
+    }
+    .rm-edu-tier {
+        background: rgba(8, 10, 16, 0.65) !important;
+        border: 1px solid rgba(255, 255, 255, 0.06) !important;
+        border-radius: 10px !important;
+        padding: 10px 12px !important;
+    }
+    .rm-edu-tier-tag {
+        font-size: 0.66rem !important;
+        font-weight: 800 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+        margin-bottom: 5px !important;
+    }
+    .rm-edu-tier-tag.is-beg { color: #34D399 !important; }
+    .rm-edu-tier-tag.is-int { color: #38BDF8 !important; }
+    .rm-edu-tier-tag.is-pro { color: #A78BFA !important; }
+    .rm-edu-tier-txt {
+        font-size: 0.77rem !important;
+        line-height: 1.52 !important;
+        color: #CBD5E1 !important;
+    }
+    .rm-edu-tier-txt b {
+        color: #F1F5F9 !important;
+    }
+    .rm-edu-thumb {
+        margin-top: 10px !important;
+        background: rgba(255, 107, 0, 0.08) !important;
+        border: 1px solid rgba(255, 107, 0, 0.25) !important;
+        border-radius: 8px !important;
+        padding: 7px 11px !important;
+        font-size: 0.75rem !important;
+        color: #E2E8F0 !important;
+        line-height: 1.45 !important;
+    }
+    .rm-edu-thumb span {
+        color: #FF8533 !important;
+        font-weight: 800 !important;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+        }
     }
     </style>
     """

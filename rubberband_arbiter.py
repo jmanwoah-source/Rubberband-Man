@@ -66,7 +66,7 @@ def generate_options_thesis(candidate: dict, sector_name: str, benchmark_symbol:
     except Exception:
         macro_summary = "- 24/48H Macro Outlook: Neutral / Balanced"
 
-    news_text = "\n".join([f"- {n['title']} ({n['publishedDate']}): {n['text']}" for n in news]) if news else "No breaking headlines in the last 72h."
+    news_text = "\n".join([f"- {n.get('title', '')} ({n.get('publishedDate', '')}): {n.get('text', '')}" for n in news]) if news else "No breaking headlines in the last 72h."
 
     sim = metrics.get("sim_1k", {})
     sim_contracts = sim.get("contracts", 1)
@@ -80,8 +80,14 @@ def generate_options_thesis(candidate: dict, sector_name: str, benchmark_symbol:
     sim_rr = sim.get("sim_rr_ratio", metrics.get("rr_ratio", 2.0))
 
     vwma20 = metrics.get("vwma20", metrics.get("sma20", 0.0))
-    dma50 = metrics.get("sma50") or profile.get("priceAvg50", "N/A")
-    dma200 = metrics.get("sma200") or profile.get("priceAvg200", "N/A")
+    _d50_raw = metrics.get("sma50") or profile.get("priceAvg50")
+    _d200_raw = metrics.get("sma200") or profile.get("priceAvg200")
+    dma50 = f"${float(_d50_raw):.2f}" if _d50_raw is not None else "N/A"
+    dma200 = f"${float(_d200_raw):.2f}" if _d200_raw is not None else "N/A"
+    signed_delta = metrics.get("signed_delta")
+    if signed_delta is None:
+        raw_d = float(metrics.get("estimated_delta", 0.50) or 0.50)
+        signed_delta = -abs(raw_d) if "PUT" in str(metrics.get("action", "")).upper() else abs(raw_d)
     z_score_val = metrics.get("z_score_5d", metrics.get("z_score", 0.0))
     z_abs_val = metrics.get("z_abs", z_score_val)
     z_rel_val = metrics.get("z_rel_5d", z_score_val)
@@ -125,7 +131,7 @@ Deliver a crisp, high-conviction 4-part Karpathy Moat & Options Synthesis:
 1. 🔬 TECHNOLOGICAL MOAT & MATERIAL BREAKTHROUGH: Define {ticker}'s core engineering monopoly, physical bottleneck, or IP moat—or expose if it is a commoditized mirage.
 2. 🐋 WHALE SUPPLY-CHAIN LEVERAGE: Explain how capex/demand from Tier-1 whales (NVDA, TSM, MSFT, AMZN, Grid Utilities) transmits into {ticker}'s order book and why the current {z_score_val:+.2f}σ stretch / coil is mispriced.
 3. ⚡ 1–5 DAY RE-RATING CATALYST: Why the combination of O-U Half-Life ({ou_hl:.1f}d), RVOL ({metrics.get('rvol')}x), and 4H CLV ({metrics.get('clv'):+.2f}) signals an imminent 1–5 day move to ${metrics.get('target_price', 0):.2f}.
-4. 🎯 30–45 DTE CONVEXITY VERDICT: Exact {metrics.get('action')} execution at the ${metrics.get('recommended_strike', 0):.2f} strike ({metrics.get('otm_pct', 0):.1f}% OTM | Δ {metrics.get('estimated_delta', 0.28):+.2f}).
+4. 🎯 30–45 DTE CONVEXITY VERDICT: Exact {metrics.get('action')} execution at the ${metrics.get('recommended_strike', 0):.2f} strike ({metrics.get('otm_pct', 0):.1f}% OTM | Δ {signed_delta:+.2f}).
 """
 
     elif mode == "red_team":
@@ -138,7 +144,7 @@ Conduct a rigorous Adversarial Red-Team Audit on this 1-5 Day {metrics.get('acti
 - Signal: {metrics.get('action', 'BUY')} @ 30–45 DTE Strike ${metrics.get('recommended_strike', 0):.2f} (Live Price: ${metrics.get('price', 0)})
 - Institutional VWMA-20 Equilibrium: ${vwma20:.2f} | 1–5D Target: ${metrics.get('target_price', 0):.2f} | Hard Stop: ${metrics.get('invalidation_price', 0):.2f}
 - Dual-Coordinate Stretch: Effective Z = {z_score_val:+.2f}σ | O-U Half-Life: {ou_hl:.1f}d | Hurst H = {hurst_val:.2f}
-- Multi-Timeframe Trend: 50-DMA: ${dma50} | 200-DMA: ${dma200}
+- Multi-Timeframe Trend: 50-DMA: {dma50} | 200-DMA: {dma200}
 - Kinetic Velocity & Microstructure: {metrics.get('velocity_status')} | 4H/1D CLV: {metrics.get('clv'):+.2f} | RVOL: {metrics.get('rvol')}x
 - FMP Pro Solvency: Quality Score {fund.get('fund_score')}/100 | Real Altman Z: {fund.get('altman_z')} | Piotroski: {fund.get('piotroski_score')}/9 | Current Ratio: {fund.get('current_ratio')}x | FCF Yield: {fund.get('fcf_yield_pct')}%
 - Upcoming Earnings Countdown: {days_to_earn} days ({earn_date_str})
@@ -151,7 +157,7 @@ Recent News Headlines:
 Deliver your Adversarial Stress-Test in 4 sections:
 1. 🚨 ADVERSARIAL THREAT LEVEL: [CRITICAL RISK | ELEVATED RISK | CONTROLLED RISK] (Calibrate honestly using Altman Z {fund.get('altman_z')} and Piotroski {fund.get('piotroski_score')}/9).
 2. ⚠️ TOP 3 FAILURE MECHANISMS (NEXT 1–5 DAYS): Specific macro, sector, or microstructure traps that could invalidate the move to ${metrics.get('target_price', 0):.2f}.
-3. 📉 KNIFE-CATCH VS. INSTITUTIONAL ABSORPTION AUDIT: Audit CLV ({metrics.get('clv'):+.2f}), RVOL ({metrics.get('rvol')}x), and 200-DMA (${dma200}) positioning.
+3. 📉 KNIFE-CATCH VS. INSTITUTIONAL ABSORPTION AUDIT: Audit CLV ({metrics.get('clv'):+.2f}), RVOL ({metrics.get('rvol')}x), and 200-DMA ({dma200}) positioning.
 4. 🛡️ FINAL CAPITAL DEFENSE VERDICT: [DEPLOY FULL $1,000 | SIZE DOWN TO $500 | STAND DOWN] with exact trigger conditions.
 """
 
@@ -161,7 +167,7 @@ Deliver your Adversarial Stress-Test in 4 sections:
         )
         prompt = f"""
 Audit the DETERMINISTIC EARNINGS COUNTDOWN, 24/48H MACRO ALIGNMENT & IV SKEW RISK for {ticker}:
-- Direction: {metrics.get('action', 'BUY')} | 30–45 DTE Strike: ${metrics.get('recommended_strike', 0):.2f} ({metrics.get('otm_pct', 0):.1f}% OTM | Δ {metrics.get('estimated_delta', 0.28):+.2f})
+- Direction: {metrics.get('action', 'BUY')} | 30–45 DTE Strike: ${metrics.get('recommended_strike', 0):.2f} ({metrics.get('otm_pct', 0):.1f}% OTM | Δ {signed_delta:+.2f})
 - FMP Pro Verified Earnings Countdown: {days_to_earn} Days Away (Next Date: {earn_date_str} | Binary 7D Warning: {metrics.get('has_binary_earnings_7d', False)})
 - Yang-Zhang 30D Realized Volatility: {yz_vol}% | 1-Year Volatility Rank: {vol_rank_val}%
 - Options Regime: {metrics.get('options_regime')} ({metrics.get('options_regime_desc')})
@@ -186,13 +192,13 @@ Deliver a Volatility, Earnings & Macro Catalyst Report in 4 sections:
 Analyze the MULTI-TIMEFRAME TREND & HURST REGIME CONFLUENCE for {ticker} ({sector_name}):
 - Current Price: ${metrics.get('price', 0)}
 - 20-Day Volume-Weighted Equilibrium (VWMA-20): ${vwma20:.2f} (Effective Z: {z_score_val:+.2f}σ)
-- 50-Day Intermediate Trend Line: ${dma50}
-- 200-Day Macro Structural Line: ${dma200}
+- 50-Day Intermediate Trend Line: {dma50}
+- 200-Day Macro Structural Line: {dma200}
 - Ornstein-Uhlenbeck Half-Life: {ou_hl:.1f} Days | Hurst Exponent H: {hurst_val:.2f} ({metrics.get('statistical_regime')})
 - Volatility Squeeze Ratio (BB/KC): {metrics.get('squeeze_ratio', 1.0):.2f}x | Beta vs {benchmark_symbol}: {metrics.get('beta', 1.0)}x
 
 Deliver a Multi-Timeframe Confluence Report in 4 sections:
-1. 🌊 STRUCTURAL & HURST REGIME: Interpret H = {hurst_val:.2f} and Half-Life = {ou_hl:.1f}d alongside the 50-DMA (${dma50}) and 200-DMA (${dma200}).
+1. 🌊 STRUCTURAL & HURST REGIME: Interpret H = {hurst_val:.2f} and Half-Life = {ou_hl:.1f}d alongside the 50-DMA ({dma50}) and 200-DMA ({dma200}).
 2. 📊 VWMA-20 & INSTITUTIONAL COST BASIS: Where current price sits relative to volume-weighted institutional cost basis (${vwma20:.2f}).
 3. ⚖️ 1–5 DAY EXPECTANCY MULTIPLIER: Win-rate impact of taking this {metrics.get('action')} in the current structural trend.
 4. 🏁 TACTICAL CONFLUENCE VERDICT: High-Probability Institutional Setup or Counter-Trend Knife Catch.
@@ -239,7 +245,7 @@ Generate a crisp, authoritative Rubberband Man Execution Card with these 5 secti
 4. ⚡ {rec_dte} DTE STRIKE, CONVICTION ({conv_200:+d}/200 · {conv_tier}) & CONVEXITY BLUEPRINT:
    - Direction & Expiration: {metrics.get('action')} | {rec_dte} DTE ({rbe.get_target_options_friday(rec_dte)}) — {dte_rationale}
    - Orthogonal 5-Pillar Score: {conv_200:+d}/200 (Elasticity {pillars.get('elasticity_kalman', 0):+.1f}, Kinetic {pillars.get('kinetic_asymmetry', 0):+.1f}, Whale {pillars.get('dealer_whale_flow', 0):+.1f}, Surface {pillars.get('surface_convexity', 0):+.1f}, Regime {pillars.get('regime_solvency', 0):+.1f})
-   - Target Strike: ${metrics.get('recommended_strike', 0):.2f} ({metrics.get('otm_pct', 0):.1f}% OTM | Estimated Δ {metrics.get('estimated_delta', 0.50):+.2f})
+   - Target Strike: ${metrics.get('recommended_strike', 0):.2f} ({metrics.get('otm_pct', 0):.1f}% OTM | Estimated Δ {signed_delta:+.2f})
    - Gamma / Vega Convexity Thesis: Why this {rec_dte} DTE contract maximizes 1–5 day return under Yang-Zhang Vol {yz_vol}% (Vol Rank {vol_rank_val}%).
    - 1–5 Day Underlying Target: ${metrics.get('target_price', 0):.2f} | Hard Invalidation Stop: ${metrics.get('invalidation_price', 0):.2f} ({metrics.get('rr_ratio', 2.0):.1f}:1 Underlying R:R)
 5. 💵 $1,000 SIMULATED TRADE DEPLOYMENT & SKEW-ADJUSTED R:R MATRIX:

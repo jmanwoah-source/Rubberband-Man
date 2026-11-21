@@ -6,12 +6,18 @@ from __future__ import annotations
 
 import inspect
 import streamlit as st
-import streamlit.components.v1 as components
-
 
 VIEW_TERMINAL = "1–5D Scanner & Options Desk"
 VIEW_SCHWAB = "Charles Schwab Practice Desk & Diary"
 VIEW_JOURNAL = "Daily Top-5 Recommendation Ledger"
+
+_PAGE_SLUG_TO_VIEW = {
+    "terminal": VIEW_TERMINAL,
+    "schwab": VIEW_SCHWAB,
+    "journal": VIEW_JOURNAL,
+}
+_VIEW_TO_PAGE_SLUG = {v: k for k, v in _PAGE_SLUG_TO_VIEW.items()}
+VIEW_SLUGS = _VIEW_TO_PAGE_SLUG
 
 
 def _in_multipage_subpage() -> bool:
@@ -24,214 +30,19 @@ def _in_multipage_subpage() -> bool:
 
 def render_sidebar_grabber() -> None:
     """
-    Mount the tactile Obsidian + Hyper-Orange sidebar toggle grabber on window.parent.document
-    and keep it locked to the sidebar's live right edge across transitions, resizes, and multipage routes.
+    No-op retained for backwards compatibility.
+    Native Streamlit `[data-testid="stExpandSidebarButton"]` styled via styles.py handles
+    sidebar toggling without body-wide MutationObserver reflows or mobile z-index overlap.
     """
-    components.html(
-        """
-        <script>
-        (function() {
-          const parentWin = window.parent;
-          const parentDoc = parentWin.document;
+    return None
 
-          if (typeof parentWin.__rmGrabberCleanup === "function") {
-            try { parentWin.__rmGrabberCleanup(); } catch (e) {}
-          }
 
-          const oldGrabber = parentDoc.getElementById("rm-sidebar-sliding-grabber");
-          if (oldGrabber) oldGrabber.remove();
-          const oldStyle = parentDoc.getElementById("rm-sliding-grabber-style");
-          if (oldStyle) oldStyle.remove();
-
-          const style = parentDoc.createElement("style");
-          style.id = "rm-sliding-grabber-style";
-          style.textContent = `
-            #rm-sidebar-sliding-grabber {
-              position: fixed;
-              top: 42%;
-              left: 0px;
-              z-index: 2147483647;
-              cursor: pointer;
-              user-select: none;
-              transition: transform 0.15s ease;
-            }
-            #rm-sidebar-sliding-grabber .grabber-tab {
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              width: 20px;
-              height: 52px;
-              background: rgba(13, 16, 23, 0.88);
-              backdrop-filter: blur(16px);
-              -webkit-backdrop-filter: blur(16px);
-              border: 1px solid rgba(255, 107, 0, 0.50);
-              border-left: none;
-              border-radius: 0 8px 8px 0;
-              box-shadow: 2px 0 12px rgba(0, 0, 0, 0.55), 0 0 12px rgba(255, 107, 0, 0.22);
-              transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s ease, box-shadow 0.2s ease;
-              pointer-events: none;
-            }
-            #rm-sidebar-sliding-grabber:hover .grabber-tab {
-              width: 26px;
-              border-color: #FF6B00;
-              box-shadow: 3px 0 16px rgba(0, 0, 0, 0.75), 0 0 18px rgba(255, 107, 0, 0.45);
-            }
-            #rm-sidebar-sliding-grabber .grabber-grip {
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              gap: 2.5px;
-              height: 20px;
-              pointer-events: none;
-            }
-            #rm-sidebar-sliding-grabber .grip-line {
-              width: 1.5px;
-              height: 15px;
-              background: #FF8533;
-              border-radius: 9999px;
-              opacity: 0.85;
-              pointer-events: none;
-            }
-          `;
-          parentDoc.head.appendChild(style);
-
-          const grabber = parentDoc.createElement("div");
-          grabber.id = "rm-sidebar-sliding-grabber";
-          grabber.setAttribute("role", "button");
-          grabber.setAttribute("aria-label", "Toggle Sidebar");
-          grabber.title = "Toggle Sidebar";
-          grabber.innerHTML = `
-            <div class="grabber-tab">
-              <div class="grabber-grip">
-                <span class="grip-line"></span>
-                <span class="grip-line"></span>
-                <span class="grip-line"></span>
-              </div>
-            </div>
-          `;
-          parentDoc.body.appendChild(grabber);
-
-          function getSidebar() {
-            return parentDoc.querySelector('section[data-testid="stSidebar"]');
-          }
-          function isSidebarOpen(sb) {
-            if (!sb) return false;
-            const aria = sb.getAttribute("aria-expanded");
-            if (aria === "false") return false;
-            const rect = sb.getBoundingClientRect();
-            return aria === "true" && rect.width > 20;
-          }
-          function findCollapseBtn() {
-            return parentDoc.querySelector('[data-testid="stSidebarCollapseButton"] button')
-              || parentDoc.querySelector('[data-testid="stSidebarHeader"] button')
-              || parentDoc.querySelector('[data-testid="stSidebarCollapseButton"]');
-          }
-          function findExpandBtn() {
-            return parentDoc.querySelector('[data-testid="stExpandSidebarButton"] button')
-              || parentDoc.querySelector('[data-testid="stExpandSidebarButton"]')
-              || parentDoc.querySelector('[data-testid="collapsedControl"] button')
-              || parentDoc.querySelector('[data-testid="stSidebarCollapsedControl"] button');
-          }
-
-          function syncPosition() {
-            const sb = getSidebar();
-            if (!sb || !isSidebarOpen(sb)) {
-              grabber.style.left = "0px";
-              return;
-            }
-            const rect = sb.getBoundingClientRect();
-            const leftPx = rect.right > 20 ? Math.round(rect.right - 1) : 0;
-            grabber.style.left = leftPx + "px";
-          }
-
-          let rafId = null;
-          function trackTransition(durationMs = 380) {
-            if (rafId !== null) {
-              parentWin.cancelAnimationFrame(rafId);
-              rafId = null;
-            }
-            const start = performance.now();
-            function tick(now) {
-              syncPosition();
-              if (now - start < durationMs) {
-                rafId = parentWin.requestAnimationFrame(tick);
-              } else {
-                rafId = null;
-                syncPosition();
-              }
-            }
-            rafId = parentWin.requestAnimationFrame(tick);
-          }
-
-          let observedSb = null;
-          let sbAttrObserver = null;
-          let sbResizeObserver = null;
-
-          function attachToSidebar(sb) {
-            if (!sb || sb === observedSb) return;
-            if (sbAttrObserver) sbAttrObserver.disconnect();
-            if (sbResizeObserver) sbResizeObserver.disconnect();
-            observedSb = sb;
-
-            sbAttrObserver = new MutationObserver(() => {
-              syncPosition();
-              trackTransition(380);
-            });
-            sbAttrObserver.observe(sb, {
-              attributes: true,
-              attributeFilter: ["aria-expanded", "style", "class"]
-            });
-
-            if (typeof ResizeObserver !== "undefined") {
-              sbResizeObserver = new ResizeObserver(syncPosition);
-              sbResizeObserver.observe(sb);
-            }
-            sb.addEventListener("transitionend", syncPosition);
-            syncPosition();
-          }
-
-          const domObserver = new MutationObserver(() => {
-            const sb = getSidebar();
-            if (sb && sb !== observedSb) {
-              attachToSidebar(sb);
-            }
-            syncPosition();
-          });
-          domObserver.observe(parentDoc.body, { childList: true, subtree: true });
-
-          const onResize = () => syncPosition();
-          parentWin.addEventListener("resize", onResize);
-
-          const onGrabberClick = (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            const sb = getSidebar();
-            const btn = isSidebarOpen(sb) ? findCollapseBtn() : findExpandBtn();
-            if (btn) btn.click();
-            trackTransition(400);
-          };
-          grabber.addEventListener("click", onGrabberClick);
-
-          attachToSidebar(getSidebar());
-          syncPosition();
-          const initTimer = parentWin.setTimeout(syncPosition, 150);
-
-          parentWin.__rmGrabberCleanup = function() {
-            if (rafId !== null) parentWin.cancelAnimationFrame(rafId);
-            parentWin.clearTimeout(initTimer);
-            parentWin.removeEventListener("resize", onResize);
-            grabber.removeEventListener("click", onGrabberClick);
-            domObserver.disconnect();
-            if (sbAttrObserver) sbAttrObserver.disconnect();
-            if (sbResizeObserver) sbResizeObserver.disconnect();
-            if (observedSb) observedSb.removeEventListener("transitionend", syncPosition);
-          };
-        })();
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
+def sync_workspace_from_query_params() -> None:
+    """Restore workspace view and density mode from URL query params on fresh/reconnected sessions."""
+    get_current_density_mode()
+    qp_page = str(st.query_params.get("page", "") or "").strip().lower()
+    if qp_page in _PAGE_SLUG_TO_VIEW and "active_app_view" not in st.session_state:
+        st.session_state["active_app_view"] = _PAGE_SLUG_TO_VIEW[qp_page]
 
 
 def get_current_density_mode() -> str:
@@ -254,11 +65,18 @@ def get_current_density_mode() -> str:
     return st.session_state["ui_density_mode"]
 
 
+def _sync_density_widget_keys(mode: str) -> None:
+    lbl = "📱 Mobile Companion" if mode == "mobile" else "🖥️ Terminal Pro"
+    st.session_state["sb_segmented_density_choice"] = lbl
+    st.session_state["sb_radio_density_choice"] = lbl
+
+
 def set_density_mode(mode: str) -> None:
-    """Update interface density mode and synchronize `?view=mobile` URL query param."""
+    """Update interface density mode, synchronize sidebar widget keys, and update `?view=mobile` query param."""
     if mode not in ("pro", "mobile"):
         return
     st.session_state["ui_density_mode"] = mode
+    _sync_density_widget_keys(mode)
     try:
         if mode == "mobile":
             st.query_params["view"] = "mobile"
@@ -272,10 +90,20 @@ def set_density_mode(mode: str) -> None:
 
 
 def _navigate_to(target_view: str, target_density: str = "pro") -> None:
-    """Switch workspace view and/or density mode cleanly across app.py and pages/*."""
+    """Switch workspace view and/or density mode cleanly without widget state-fight loops."""
     set_density_mode(target_density)
     st.session_state["pending_workspace_view"] = target_view
     st.session_state["active_app_view"] = target_view
+    st.session_state["mobile_workspace_nav_select_top"] = target_view
+    try:
+        slug = _VIEW_TO_PAGE_SLUG.get(target_view, "terminal")
+        if slug == "terminal":
+            if "page" in st.query_params:
+                del st.query_params["page"]
+        else:
+            st.query_params["page"] = slug
+    except Exception:
+        pass
 
     if _in_multipage_subpage():
         page_map = {
@@ -293,42 +121,47 @@ def _navigate_to(target_view: str, target_density: str = "pro") -> None:
 
 
 def render_sidebar_density_control() -> None:
-    """Render a frosted obsidian density toggle in the sidebar."""
+    """Render a frosted obsidian density toggle in the sidebar using an on_change callback."""
     curr_mode = get_current_density_mode()
     mode_options = ["🖥️ Terminal Pro", "📱 Mobile Companion"]
-    curr_idx = 0 if curr_mode == "pro" else 1
+    desired_lbl = mode_options[0] if curr_mode == "pro" else mode_options[1]
 
     st.markdown(
         "<div class='rm-sb-section-label'>Interface Density</div>",
         unsafe_allow_html=True,
     )
 
+    def _on_sb_seg_change() -> None:
+        chosen = st.session_state.get("sb_segmented_density_choice")
+        if chosen:
+            set_density_mode("mobile" if "Mobile" in str(chosen) else "pro")
+
+    def _on_sb_radio_change() -> None:
+        chosen = st.session_state.get("sb_radio_density_choice")
+        if chosen:
+            set_density_mode("mobile" if "Mobile" in str(chosen) else "pro")
+
     try:
-        chosen = st.segmented_control(
+        if st.session_state.get("sb_segmented_density_choice") != desired_lbl:
+            st.session_state["sb_segmented_density_choice"] = desired_lbl
+        st.segmented_control(
             "Density Mode",
             options=mode_options,
-            default=mode_options[curr_idx],
             key="sb_segmented_density_choice",
             label_visibility="collapsed",
+            on_change=_on_sb_seg_change,
         )
-        if chosen:
-            new_mode = "mobile" if "Mobile" in chosen else "pro"
-            if new_mode != curr_mode:
-                set_density_mode(new_mode)
-                st.rerun()
     except Exception:
-        chosen = st.radio(
+        if st.session_state.get("sb_radio_density_choice") != desired_lbl:
+            st.session_state["sb_radio_density_choice"] = desired_lbl
+        st.radio(
             "Density Mode",
             options=mode_options,
-            index=curr_idx,
             key="sb_radio_density_choice",
             label_visibility="collapsed",
             horizontal=True,
+            on_change=_on_sb_radio_change,
         )
-        new_mode = "mobile" if "Mobile" in chosen else "pro"
-        if new_mode != curr_mode:
-            set_density_mode(new_mode)
-            st.rerun()
 
 
 def render_top_navigation_strip(current_view: str) -> None:
@@ -369,17 +202,34 @@ def render_top_navigation_strip(current_view: str) -> None:
                 VIEW_JOURNAL: "📊 Ticker Journal",
             }
             view_keys = list(views_map.keys())
-            curr_idx = view_keys.index(current_view) if current_view in view_keys else 0
-            sel = st.selectbox(
+            if st.session_state.get("mobile_workspace_nav_select_top") != current_view:
+                st.session_state["mobile_workspace_nav_select_top"] = (
+                    current_view if current_view in view_keys else view_keys[0]
+                )
+
+            def _on_mobile_top_nav_change() -> None:
+                sel_v = st.session_state.get("mobile_workspace_nav_select_top", VIEW_TERMINAL)
+                set_density_mode("mobile")
+                st.session_state["pending_workspace_view"] = sel_v
+                st.session_state["active_app_view"] = sel_v
+                try:
+                    slug = _VIEW_TO_PAGE_SLUG.get(sel_v, "terminal")
+                    if slug == "terminal":
+                        if "page" in st.query_params:
+                            del st.query_params["page"]
+                    else:
+                        st.query_params["page"] = slug
+                except Exception:
+                    pass
+
+            st.selectbox(
                 "Workspace Page",
                 options=view_keys,
-                index=curr_idx,
                 format_func=lambda k: views_map.get(k, k),
                 key="mobile_workspace_nav_select_top",
                 label_visibility="collapsed",
+                on_change=_on_mobile_top_nav_change,
             )
-            if sel != current_view:
-                _navigate_to(sel, target_density="mobile")
         return
 
     nav_items = [

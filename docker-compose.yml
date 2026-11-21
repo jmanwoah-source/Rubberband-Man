@@ -11,6 +11,28 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data
+      - ./intel_bus:/app/intel_bus
+      - ./signals:/app/signals
+      - ./watchlist.json:/app/watchlist.json
     extra_hosts:
       # Allows the container to access host services like Ollama on http://host.docker.internal:11434
+      - "host.docker.internal:host-gateway"
+
+  rubberband_daemon:
+    build: .
+    container_name: rubberband_man_daemon
+    restart: unless-stopped
+    entrypoint: ["python", "daily_tracker_daemon.py", "--daemon", "--interval", "1800"]
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data
+      - ./intel_bus:/app/intel_bus
+      - ./signals:/app/signals
+      - ./watchlist.json:/app/watchlist.json
+    extra_hosts:
       - "host.docker.internal:host-gateway"

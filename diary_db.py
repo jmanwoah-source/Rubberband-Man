@@ -9,123 +9,157 @@ Provides persistent storage and institutional ledger tracking for:
 import os
 import re
 import json
+import uuid
 import sqlite3
 import datetime
-from typing import List, Dict, Any, Optional, Tuple
+import threading
+from contextlib import contextmanager
+from zoneinfo import ZoneInfo
+from typing import List, Dict, Any, Optional, Tuple, Iterator
 
 DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(DB_DIR, "simulated_diary.db")
 
+_INIT_LOCK = threading.Lock()
+_DB_INITIALIZED_PATH: Optional[str] = None
 
-def _get_connection() -> sqlite3.Connection:
-    """Returns a SQLite connection configured for concurrent WAL mode."""
+
+def _ny_today() -> datetime.date:
+    try:
+        return datetime.datetime.now(ZoneInfo("America/New_York")).date()
+    except Exception:
+        return datetime.date.today()
+
+
+def _ny_now() -> datetime.datetime:
+    try:
+        return datetime.datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return datetime.datetime.now()
+
+
+@contextmanager
+def _get_connection() -> Iterator[sqlite3.Connection]:
+    """Yields a SQLite connection configured for concurrent WAL mode and always closes it."""
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    return conn
+    try:
+        conn.execute("PRAGMA busy_timeout=15000;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        yield conn
+        if conn.in_transaction:
+            conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_diary_db() -> None:
-    """Initializes database schema with WAL mode and indices."""
-    with _get_connection() as conn:
-        # Table 1: Simulated Options Trades & Practice Diary (Schwab Order Format)
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS simulated_trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            schwab_order_id TEXT UNIQUE NOT NULL,
-            symbol TEXT NOT NULL,
-            strategy TEXT DEFAULT 'SINGLE_LEG',
-            action TEXT NOT NULL,
-            option_type TEXT NOT NULL,
-            strike REAL NOT NULL,
-            expiration_date TEXT NOT NULL,
-            dte_at_entry INTEGER DEFAULT 35,
-            order_type TEXT DEFAULT 'LIMIT',
-            quantity INTEGER NOT NULL DEFAULT 1,
-            limit_price REAL NOT NULL,
-            stock_price_at_entry REAL NOT NULL,
-            total_cost REAL NOT NULL,
-            commission_fee REAL DEFAULT 0.65,
-            target_stock_price REAL,
-            stop_stock_price REAL,
-            target_premium REAL,
-            stop_premium REAL,
-            entry_timestamp TEXT NOT NULL,
-            exit_timestamp TEXT,
-            exit_premium REAL,
-            exit_stock_price REAL,
-            status TEXT DEFAULT 'OPEN',
-            realized_pnl_dollar REAL DEFAULT 0.0,
-            realized_pnl_pct REAL DEFAULT 0.0,
-            conviction_score REAL DEFAULT 50.0,
-            expected_basis_pct REAL DEFAULT 0.0,
-            whale_badge TEXT DEFAULT '⚪ TWO-WAY FLOW',
-            catalyst_tag TEXT,
-            notes TEXT,
-            created_at TEXT NOT NULL
-        );
-        """)
+    """Initializes database schema with WAL mode and indices once per process/DB_PATH."""
+    global _DB_INITIALIZED_PATH
+    if _DB_INITIALIZED_PATH == DB_PATH:
+        return
+    with _INIT_LOCK:
+        if _DB_INITIALIZED_PATH == DB_PATH:
+            return
+        with _get_connection() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            # Table 1: Simulated Options Trades & Practice Diary (Schwab Order Format)
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS simulated_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schwab_order_id TEXT UNIQUE NOT NULL,
+                symbol TEXT NOT NULL,
+                strategy TEXT DEFAULT 'SINGLE_LEG',
+                action TEXT NOT NULL,
+                option_type TEXT NOT NULL,
+                strike REAL NOT NULL,
+                expiration_date TEXT NOT NULL,
+                dte_at_entry INTEGER DEFAULT 35,
+                order_type TEXT DEFAULT 'LIMIT',
+                quantity INTEGER NOT NULL DEFAULT 1,
+                limit_price REAL NOT NULL,
+                stock_price_at_entry REAL NOT NULL,
+                total_cost REAL NOT NULL,
+                commission_fee REAL DEFAULT 0.65,
+                target_stock_price REAL,
+                stop_stock_price REAL,
+                target_premium REAL,
+                stop_premium REAL,
+                entry_timestamp TEXT NOT NULL,
+                exit_timestamp TEXT,
+                exit_premium REAL,
+                exit_stock_price REAL,
+                status TEXT DEFAULT 'OPEN',
+                realized_pnl_dollar REAL DEFAULT 0.0,
+                realized_pnl_pct REAL DEFAULT 0.0,
+                conviction_score REAL DEFAULT 50.0,
+                expected_basis_pct REAL DEFAULT 0.0,
+                whale_badge TEXT DEFAULT '⚪ TWO-WAY FLOW',
+                catalyst_tag TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            );
+            """)
 
-        # Table 2: Daily Top-5 Recommendation Snapshots
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS daily_recommendations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_date TEXT NOT NULL,
-            snapshot_time TEXT NOT NULL,
-            sector TEXT NOT NULL,
-            rank INTEGER NOT NULL,
-            symbol TEXT NOT NULL,
-            company_name TEXT,
-            action TEXT NOT NULL,
-            composite_score REAL NOT NULL,
-            price_at_snapshot REAL NOT NULL,
-            vwma20_at_rec REAL,
-            z_score_at_rec REAL,
-            expected_basis_pct REAL,
-            empirical_win_rate REAL,
-            whale_badge TEXT,
-            whale_score REAL,
-            days_to_earnings INTEGER,
-            earnings_date TEXT,
-            recommended_strike REAL,
-            target_price REAL,
-            invalidation_price REAL,
-            half_life REAL,
-            raw_meta_json TEXT,
-            created_at TEXT NOT NULL,
-            UNIQUE(snapshot_date, sector, rank)
-        );
-        """)
+            # Table 2: Daily Top-5 Recommendation Snapshots
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date TEXT NOT NULL,
+                snapshot_time TEXT NOT NULL,
+                sector TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                company_name TEXT,
+                action TEXT NOT NULL,
+                composite_score REAL NOT NULL,
+                price_at_snapshot REAL NOT NULL,
+                vwma20_at_rec REAL,
+                z_score_at_rec REAL,
+                expected_basis_pct REAL,
+                empirical_win_rate REAL,
+                whale_badge TEXT,
+                whale_score REAL,
+                days_to_earnings INTEGER,
+                earnings_date TEXT,
+                recommended_strike REAL,
+                target_price REAL,
+                invalidation_price REAL,
+                half_life REAL,
+                raw_meta_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(snapshot_date, sector, rank)
+            );
+            """)
 
-        # Migrations: ensure implied_vol_at_entry and short_strike exist on simulated_trades
-        try:
-            conn.execute("ALTER TABLE simulated_trades ADD COLUMN implied_vol_at_entry REAL;")
-        except Exception:
-            pass
-        try:
-            conn.execute("ALTER TABLE simulated_trades ADD COLUMN short_strike REAL;")
-        except Exception:
-            pass
+            # Migrations: ensure implied_vol_at_entry and short_strike exist on simulated_trades
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(simulated_trades);").fetchall()}
+            if "implied_vol_at_entry" not in cols:
+                conn.execute("ALTER TABLE simulated_trades ADD COLUMN implied_vol_at_entry REAL;")
+            if "short_strike" not in cols:
+                conn.execute("ALTER TABLE simulated_trades ADD COLUMN short_strike REAL;")
 
-        # Table 3: Daily OPRA ATM IV Snapshot Log (accumulates true IV percentile history)
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS iv_history_log (
-            symbol TEXT NOT NULL,
-            trade_date TEXT NOT NULL,
-            atm_iv REAL NOT NULL,
-            PRIMARY KEY(symbol, trade_date)
-        );
-        """)
+            # Table 3: Daily OPRA ATM IV Snapshot Log (accumulates true IV percentile history)
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS iv_history_log (
+                symbol TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                atm_iv REAL NOT NULL,
+                PRIMARY KEY(symbol, trade_date)
+            );
+            """)
 
-        # Performance Indices
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON simulated_trades(status);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON simulated_trades(symbol);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_recs_date_sec ON daily_recommendations(snapshot_date, sector);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_recs_symbol ON daily_recommendations(symbol);")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_recs_date_sec_rank ON daily_recommendations(snapshot_date, sector, rank);")
-        conn.commit()
+            # Performance Indices
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON simulated_trades(status);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON simulated_trades(symbol);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_recs_date_sec ON daily_recommendations(snapshot_date, sector);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_recs_symbol ON daily_recommendations(symbol);")
+        _DB_INITIALIZED_PATH = DB_PATH
 
 
 # =========================================================================
@@ -133,9 +167,9 @@ def init_diary_db() -> None:
 # =========================================================================
 
 def generate_schwab_order_id(symbol: str) -> str:
-    """Generates an authentic Charles Schwab style order reference number."""
-    now = datetime.datetime.now()
-    rand_suffix = (int(now.timestamp() * 1000) % 90000) + 10000
+    """Generates a unique Charles Schwab style order reference number."""
+    now = _ny_now()
+    rand_suffix = uuid.uuid4().hex[:6].upper()
     return f"SCHW-{symbol.upper()}-{now.strftime('%y%m%d')}-{rand_suffix}"
 
 
@@ -169,11 +203,18 @@ def create_simulated_trade(
     """
     init_diary_db()
     order_id = generate_schwab_order_id(symbol)
-    now_iso = datetime.datetime.now().isoformat()
+    now_iso = _ny_now().isoformat()
     
-    # Standard Schwab options calculation: Limit Price * 100 * Qty + Schwab contract fee ($0.65/contract)
-    contract_fee = round(quantity * 0.65, 2)
-    total_cost = round((quantity * limit_price * 100.0) + contract_fee, 2)
+    # Standard Schwab options calculation: Limit Price * 100 * Qty + Schwab contract fee ($0.65/contract per leg)
+    is_spread = str(strategy).upper() == "VERTICAL_DEBIT_SPREAD" and short_strike is not None and abs(float(short_strike) - float(strike)) > 0.01
+    leg_mult = 2 if is_spread else 1
+    contract_fee = round(quantity * 0.65 * leg_mult, 2)
+    action_u = str(action).upper()
+    if "SELL" in action_u:
+        # Credit received (stored as net cash received / collateralized basis; total_cost tracks notional credit or collateral)
+        total_cost = round(max(0.0, (quantity * limit_price * 100.0) - contract_fee), 2)
+    else:
+        total_cost = round((quantity * limit_price * 100.0) + contract_fee, 2)
 
     # Compute Days to Expiration (DTE)
     if dte is not None and int(dte) > 0:
@@ -189,10 +230,10 @@ def create_simulated_trade(
                 clean_exp = str(expiration_date).split("(")[0].strip()
                 try:
                     exp_dt = datetime.datetime.strptime(clean_exp, "%b %d, %Y").date()
-                    dte = max(1, (exp_dt - datetime.date.today()).days)
+                    dte = max(1, (exp_dt - _ny_today()).days)
                 except Exception:
                     exp_dt = datetime.date.fromisoformat(clean_exp[:10])
-                    dte = max(1, (exp_dt - datetime.date.today()).days)
+                    dte = max(1, (exp_dt - _ny_today()).days)
         except Exception:
             dte = 35
 
@@ -278,32 +319,54 @@ def close_simulated_trade(
     exit_notes: str = ""
 ) -> bool:
     """
-    Closes an open simulated trade, calculating realized P&L and recording exit notes.
+    Closes an open simulated trade atomically inside BEGIN IMMEDIATE,
+    calculating realized P&L accurately for both BUY_TO_OPEN and SELL_TO_OPEN.
     """
     init_diary_db()
-    now_iso = datetime.datetime.now().isoformat()
+    now_iso = _ny_now().isoformat()
     with _get_connection() as conn:
-        row = conn.execute("SELECT * FROM simulated_trades WHERE id = ?;", (trade_id,)).fetchone()
+        conn.execute("BEGIN IMMEDIATE;")
+        row = conn.execute(
+            "SELECT * FROM simulated_trades WHERE id = ? AND status = 'OPEN';",
+            (trade_id,),
+        ).fetchone()
         if not row:
+            conn.rollback()
             return False
-        
+
         trade = dict(row)
-        qty = trade["quantity"]
-        entry_prem = trade["limit_price"]
-        entry_cost = trade["total_cost"]
-        
-        # Realized P&L
-        gross_proceeds = qty * exit_premium * 100.0
-        exit_fee = qty * 0.65
-        net_proceeds = gross_proceeds - exit_fee
-        realized_dollar = round(net_proceeds - entry_cost, 2)
-        realized_pct = round((realized_dollar / max(1.0, entry_cost)) * 100.0, 1)
+        qty = int(trade["quantity"])
+        entry_cost = float(trade["total_cost"])
+        is_spread = (
+            str(trade.get("strategy", "")).upper() == "VERTICAL_DEBIT_SPREAD"
+            and trade.get("short_strike") is not None
+        )
+        leg_mult = 2 if is_spread else 1
+        exit_fee = round(qty * 0.65 * leg_mult, 2)
+        gross_exit = qty * float(exit_premium) * 100.0
+
+        if "SELL" in str(trade.get("action", "")).upper():
+            # Short option / credit: received entry_cost credit, pay gross_exit + exit_fee to close
+            close_debit = gross_exit + exit_fee
+            realized_dollar = round(entry_cost - close_debit, 2)
+            # Denominator: width risk for spread or collateralized credit
+            short_k = trade.get("short_strike")
+            if is_spread and short_k is not None:
+                max_risk = max(1.0, abs(float(short_k) - float(trade["strike"])) * 100.0 * qty - entry_cost)
+            else:
+                max_risk = max(1.0, entry_cost)
+            realized_pct = round((realized_dollar / max_risk) * 100.0, 1)
+        else:
+            # Long option / debit: paid entry_cost, receive gross_exit - exit_fee on close
+            net_proceeds = gross_exit - exit_fee
+            realized_dollar = round(net_proceeds - entry_cost, 2)
+            realized_pct = round((realized_dollar / max(1.0, entry_cost)) * 100.0, 1)
 
         merged_notes = trade["notes"] or ""
         if exit_notes:
             merged_notes += f" [Exit Notes ({now_iso[:10]}): {exit_notes}]"
 
-        conn.execute("""
+        cur = conn.execute("""
         UPDATE simulated_trades
         SET status = 'CLOSED',
             exit_timestamp = ?,
@@ -312,10 +375,10 @@ def close_simulated_trade(
             realized_pnl_dollar = ?,
             realized_pnl_pct = ?,
             notes = ?
-        WHERE id = ?;
+        WHERE id = ? AND status = 'OPEN';
         """, (now_iso, exit_premium, exit_stock_price, realized_dollar, realized_pct, merged_notes, trade_id))
         conn.commit()
-        return True
+        return cur.rowcount > 0
 
 
 def delete_simulated_trade(trade_id: int) -> bool:
@@ -387,7 +450,7 @@ def has_snapshot_for_date(snapshot_date: str, sector_name: str) -> bool:
             SELECT COUNT(*) FROM daily_recommendations
             WHERE snapshot_date = ? AND sector = ?;
         """, (snapshot_date, sector_name)).fetchone()[0]
-        return count >= 5
+        return count >= 1
 
 
 def save_top5_snapshot(
@@ -400,7 +463,7 @@ def save_top5_snapshot(
     Guarantees idempotency via INSERT OR REPLACE.
     """
     init_diary_db()
-    now = datetime.datetime.now()
+    now = _ny_now()
     s_date = snapshot_date or now.strftime("%Y-%m-%d")
     s_time = now.strftime("%H:%M:%S")
     created_at = now.isoformat()
@@ -506,7 +569,7 @@ def record_daily_iv_snapshot(symbol: str, atm_iv: float, trade_date: Optional[st
     except Exception:
         return
     init_diary_db()
-    t_date = trade_date or datetime.date.today().isoformat()
+    t_date = trade_date or _ny_today().isoformat()
     try:
         with _get_connection() as conn:
             conn.execute(

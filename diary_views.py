@@ -10,6 +10,7 @@ Features:
 6. 24/7 GX10 Autonomous Daily Top-5 Recommendation Ledger & Empirical Performance Auditing across 5 expanded sectors.
 """
 
+import html as _html
 import math
 import json
 import time
@@ -30,6 +31,163 @@ try:
     import ui_kit as _ui_kit
 except Exception:
     _ui_kit = None
+
+try:
+    import edu_annotations as _edu
+except Exception:
+    _edu = None
+
+
+def _esc(val: Any) -> str:
+    return _html.escape(str(val if val is not None else ""), quote=True)
+
+
+def _safe_http_url(url: Any) -> str:
+    s = str(url or "").strip()
+    if s.startswith("https://") or s.startswith("http://"):
+        return _html.escape(s, quote=True)
+    return ""
+
+
+_TICKET_RESET_KEYS = (
+    "ticket_action_rail", "ticket_type_rail", "ticket_strategy_rail",
+    "ticket_strike_rail", "ticket_short_strike_rail", "ticket_qty_rail",
+    "ticket_limit_rail", "ticket_tgt_spot_rail", "ticket_stp_spot_rail",
+    "ticket_notes_rail", "ticket_conv_rail", "dlg_strategy", "dlg_action", "dlg_ord_type",
+    "dlg_qty", "dlg_limit", "dlg_short_strike", "dlg_tgt_val", "dlg_stp_val", "dlg_notes",
+)
+
+
+def _reset_ticket_widget_state() -> None:
+    for _k in _TICKET_RESET_KEYS:
+        if _k in st.session_state:
+            del st.session_state[_k]
+
+
+def _compute_order_payoff_summary(
+    spot_price: float,
+    strike_p: float,
+    limit_p: float,
+    qty: int,
+    dte: int,
+    sigma: float,
+    opt_type: str,
+    opt_action: str,
+    strategy: str,
+    short_strike: Optional[float],
+    tgt_val: float,
+    stp_val: float,
+) -> Dict[str, Any]:
+    """Shared payoff & Greek summary for both the Schwab modal and order rail (supports BUY & SELL)."""
+    is_call = (str(opt_type).upper() == "CALL")
+    is_sell = ("SELL" in str(opt_action).upper())
+    is_spread = (
+        str(strategy).upper() == "VERTICAL_DEBIT_SPREAD"
+        and short_strike is not None
+        and abs(float(short_strike) - float(strike_p)) > 0.01
+    )
+    k2 = float(short_strike) if is_spread else 0.0
+
+    leg_mult = 2 if is_spread else 1
+    schwab_comm = round(qty * 0.65 * leg_mult, 2)
+    gross_principal = round(qty * limit_p * 100.0, 2)
+    if is_sell:
+        net_credit = round(max(0.0, gross_principal - schwab_comm), 2)
+        if is_spread:
+            width_dollars = abs(k2 - strike_p) * 100.0 * qty
+            total_cash_or_risk = round(max(1.0, width_dollars - net_credit), 2)
+        else:
+            total_cash_or_risk = round(max(1.0, gross_principal), 2)
+        be_price = round((strike_p + limit_p) if is_call else max(0.01, strike_p - limit_p), 2)
+    else:
+        total_cash_or_risk = round(gross_principal + schwab_comm, 2)
+        net_credit = 0.0
+        be_price = round((strike_p + limit_p) if is_call else max(0.01, strike_p - limit_p), 2)
+
+    be_pct = ((be_price - spot_price) / spot_price) * 100.0 if spot_price else 0.0
+
+    t_entry = max(1, dte) / 365.0
+    t_exit = max(1, dte - 4) / 365.0
+    g_long = _exact_leg_greeks(s=spot_price, k=strike_p, t=t_entry, r=0.0425, sigma=sigma, opt_type=opt_type)
+    if is_spread:
+        g_short = _exact_leg_greeks(s=spot_price, k=k2, t=t_entry, r=0.0425, sigma=sigma, opt_type=opt_type)
+        raw_delta = float(g_long["delta"] - g_short["delta"])
+        raw_theta = float(g_long["theta"] - g_short["theta"])
+        raw_vega = float(g_long["vega"] - g_short["vega"])
+    else:
+        raw_delta = float(g_long["delta"])
+        raw_theta = float(g_long["theta"])
+        raw_vega = float(g_long["vega"])
+
+    dir_sgn = -1.0 if is_sell else 1.0
+    pos_delta_shares = round(dir_sgn * raw_delta * 100.0 * qty, 0)
+    pos_theta_daily = round(dir_sgn * raw_theta * 100.0 * qty, 2)
+    pos_vega_vol = round(dir_sgn * raw_vega * 100.0 * qty, 2)
+
+    if is_call:
+        bs_now, _ = rbe3.bs_call_price_delta(spot_price, strike_p, t_entry, 0.0425, sigma)
+        bs_tgt, _ = rbe3.bs_call_price_delta(tgt_val, strike_p, t_exit, 0.0425, sigma)
+        bs_stp, _ = rbe3.bs_call_price_delta(stp_val, strike_p, t_exit, 0.0425, sigma)
+        target_intrinsic = max(0.0, tgt_val - strike_p)
+        if is_spread:
+            s_now, _ = rbe3.bs_call_price_delta(spot_price, k2, t_entry, 0.0425, sigma)
+            s_tgt, _ = rbe3.bs_call_price_delta(tgt_val, k2, t_exit, 0.0425, sigma)
+            s_stp, _ = rbe3.bs_call_price_delta(stp_val, k2, t_exit, 0.0425, sigma)
+            bs_now = max(0.05, bs_now - s_now)
+            bs_tgt = max(0.01, min(abs(k2 - strike_p), bs_tgt - s_tgt))
+            bs_stp = max(0.01, min(abs(k2 - strike_p), bs_stp - s_stp))
+            target_intrinsic = max(0.0, min(abs(k2 - strike_p), target_intrinsic - max(0.0, tgt_val - k2)))
+    else:
+        bs_now, _ = rbe3.bs_put_price_delta(spot_price, strike_p, t_entry, 0.0425, sigma)
+        bs_tgt, _ = rbe3.bs_put_price_delta(tgt_val, strike_p, t_exit, 0.0425, sigma)
+        bs_stp, _ = rbe3.bs_put_price_delta(stp_val, strike_p, t_exit, 0.0425, sigma)
+        target_intrinsic = max(0.0, strike_p - tgt_val)
+        if is_spread:
+            s_now, _ = rbe3.bs_put_price_delta(spot_price, k2, t_entry, 0.0425, sigma)
+            s_tgt, _ = rbe3.bs_put_price_delta(tgt_val, k2, t_exit, 0.0425, sigma)
+            s_stp, _ = rbe3.bs_put_price_delta(stp_val, k2, t_exit, 0.0425, sigma)
+            bs_now = max(0.05, bs_now - s_now)
+            bs_tgt = max(0.01, min(abs(k2 - strike_p), bs_tgt - s_tgt))
+            bs_stp = max(0.01, min(abs(k2 - strike_p), bs_stp - s_stp))
+            target_intrinsic = max(0.0, min(abs(k2 - strike_p), target_intrinsic - max(0.0, k2 - tgt_val)))
+
+    prem_scale = (limit_p / bs_now) if bs_now > 0.05 else 1.0
+    opt_val_at_tgt = max(0.01 if is_sell else target_intrinsic, bs_tgt * prem_scale)
+    opt_val_at_stop = max(0.01, bs_stp * prem_scale)
+    if is_spread:
+        opt_val_at_tgt = min(abs(k2 - strike_p), opt_val_at_tgt)
+        opt_val_at_stop = min(abs(k2 - strike_p), opt_val_at_stop)
+
+    if is_sell:
+        close_at_tgt = qty * opt_val_at_tgt * 100.0 + schwab_comm
+        close_at_stp = qty * opt_val_at_stop * 100.0 + schwab_comm
+        net_profit_at_tgt = round(net_credit - close_at_tgt, 2)
+        est_loss_at_stop = round(max(0.0, close_at_stp - net_credit), 2)
+    else:
+        gross_payout_at_tgt = round(qty * opt_val_at_tgt * 100.0, 2)
+        net_profit_at_tgt = round(gross_payout_at_tgt - schwab_comm - total_cash_or_risk, 2)
+        gross_val_at_stop = round(qty * opt_val_at_stop * 100.0, 2)
+        est_loss_at_stop = round(max(0.0, total_cash_or_risk - (gross_val_at_stop - schwab_comm)), 2)
+
+    roi_at_tgt_pct = (net_profit_at_tgt / total_cash_or_risk * 100.0) if total_cash_or_risk > 0 else 0.0
+    stop_loss_pct = (est_loss_at_stop / total_cash_or_risk * 100.0) if total_cash_or_risk > 0 else 100.0
+
+    return {
+        "is_spread": is_spread,
+        "is_sell": is_sell,
+        "schwab_comm": schwab_comm,
+        "total_outlay": total_cash_or_risk,
+        "net_credit": net_credit,
+        "be_price": be_price,
+        "be_pct": be_pct,
+        "pos_delta_shares": pos_delta_shares,
+        "pos_theta_daily": pos_theta_daily,
+        "pos_vega_vol": pos_vega_vol,
+        "net_profit_at_tgt": net_profit_at_tgt,
+        "roi_at_tgt_pct": roi_at_tgt_pct,
+        "est_loss_at_stop": est_loss_at_stop,
+        "stop_loss_pct": stop_loss_pct,
+    }
 
 
 _FALLBACK_SECTOR_ALIASES = {
@@ -1141,9 +1299,9 @@ def render_schwab_order_dialog(active_leg: Dict[str, Any], cand_intel: Optional[
             <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px;">
                 <span class="obs-pill-orange">SCHWAB ARMED ORDER</span>
                 <span class="obs-mono" style="font-size: 1.15rem; font-weight: 800; color: {'#34D399' if leg_type=='CALL' else '#FB7185'};">
-                    {leg_sym} ${leg_strike:.2f} {leg_type}
+                    {_esc(leg_sym)} ${leg_strike:.2f} {_esc(leg_type)}
                 </span>
-                <span style="font-size: 0.80rem; color: #94A3B8;">({leg_dte} DTE &bull; {leg_exp})</span>
+                <span style="font-size: 0.80rem; color: #94A3B8;">({leg_dte} DTE &bull; {_esc(leg_exp)})</span>
                 {conv_badge_html}
                 {dte_badge_html}
             </div>
@@ -1155,127 +1313,87 @@ def render_schwab_order_dialog(active_leg: Dict[str, Any], cand_intel: Optional[
     """)
 
     # Order Specification Row
+    st.session_state.setdefault(
+        "dlg_strategy",
+        "VERTICAL_DEBIT_SPREAD" if def_strat == "VERTICAL_DEBIT_SPREAD" else "SINGLE_LEG",
+    )
+    st.session_state.setdefault(
+        "dlg_action",
+        "BUY_TO_OPEN" if "BUY" in leg_action else "SELL_TO_OPEN",
+    )
+    st.session_state.setdefault("dlg_ord_type", "LIMIT")
+    st.session_state.setdefault("dlg_qty", 1)
+
     col_k0, col_k1, col_k2, col_k3, col_k4 = st.columns([1.3, 1.1, 1.0, 0.9, 1.1])
     with col_k0:
         sel_strategy = st.selectbox(
             "Strategy Structure",
             ["SINGLE_LEG", "VERTICAL_DEBIT_SPREAD"],
-            index=1 if def_strat == "VERTICAL_DEBIT_SPREAD" else 0,
             key="dlg_strategy",
+            help="SINGLE_LEG buys pure directional convexity; VERTICAL_DEBIT_SPREAD sells a further OTM wing to cut cost & IV crush.",
         )
     with col_k1:
-        opt_action = st.selectbox("Action", ["BUY_TO_OPEN", "SELL_TO_OPEN"], index=0 if "BUY" in leg_action else 1, key="dlg_action")
+        opt_action = st.selectbox(
+            "Action",
+            ["BUY_TO_OPEN", "SELL_TO_OPEN"],
+            key="dlg_action",
+            help="BUY_TO_OPEN pays cash up front for limited risk; SELL_TO_OPEN collects credit up front.",
+        )
     with col_k2:
-        opt_ord_type = st.selectbox("Order Type", ["LIMIT", "MARKET"], index=0, key="dlg_ord_type")
+        opt_ord_type = st.selectbox("Order Type", ["LIMIT", "MARKET"], key="dlg_ord_type", help="LIMIT caps your entry fill price; avoid MARKET orders on wide spreads.")
     with col_k3:
-        opt_qty = st.number_input("Contracts", min_value=1, max_value=100, value=1, step=1, key="dlg_qty")
+        opt_qty = st.number_input("Contracts", min_value=1, max_value=100, step=1, key="dlg_qty")
     with col_k4:
         def_dlg_limit = (
             float(active_leg.get("net_debit") or prefill.get("net_debit") or leg_limit)
             if sel_strategy == "VERTICAL_DEBIT_SPREAD"
             else float(leg_limit)
         )
-        opt_limit = st.number_input("Limit Price ($)", min_value=0.01, max_value=2500.0, value=round(max(0.01, def_dlg_limit), 2), step=0.01, format="%.2f", key="dlg_limit")
+        st.session_state.setdefault("dlg_limit", round(max(0.01, def_dlg_limit), 2))
+        opt_limit = st.number_input("Limit Price ($)", min_value=0.01, max_value=2500.0, step=0.01, format="%.2f", key="dlg_limit", help="Price per share (multiply by 100 for per-contract cash cost).")
 
     short_k_val: Optional[float] = None
     if sel_strategy == "VERTICAL_DEBIT_SPREAD":
+        st.session_state.setdefault("dlg_short_strike", float(def_short_k))
         short_k_val = float(
             st.number_input(
                 "Short Strike K2 ($)",
                 min_value=0.5,
                 max_value=5000.0,
-                value=float(def_short_k),
                 step=0.5,
                 format="%.2f",
                 key="dlg_short_strike",
+                help="The further-OTM wing sold to subsidize your long strike and reduce daily Theta bleed.",
             )
         )
 
-    is_spread_dlg = (sel_strategy == "VERTICAL_DEBIT_SPREAD") and (short_k_val is not None) and (abs(short_k_val - leg_strike) > 0.01)
-    gross_prem = round(opt_qty * opt_limit * 100.0, 2)
-    leg_mult = 2 if is_spread_dlg else 1
-    schwab_comm = round(opt_qty * 0.65 * leg_mult, 2)
-    total_debit = round(gross_prem + schwab_comm, 2)
-
-    be_price = round(leg_strike + opt_limit if leg_type == "CALL" else leg_strike - opt_limit, 2)
-    be_pct = ((be_price - spot_price) / spot_price) * 100.0 if spot_price else 0.0
-
     sigma_dlg = leg_iv / 100.0 if leg_iv > 3.0 else max(0.15, leg_iv)
-    active_greeks = _exact_leg_greeks(
-        s=spot_price,
-        k=leg_strike,
-        t=leg_dte / 365.0,
-        r=0.0425,
-        sigma=sigma_dlg,
-        opt_type=leg_type
-    )
-    if is_spread_dlg and short_k_val is not None:
-        short_greeks = _exact_leg_greeks(
-            s=spot_price,
-            k=short_k_val,
-            t=leg_dte / 365.0,
-            r=0.0425,
-            sigma=sigma_dlg,
-            opt_type=leg_type,
-        )
-        est_delta = float(active_greeks["delta"] - short_greeks["delta"])
-        pos_theta_daily = round((active_greeks["theta"] - short_greeks["theta"]) * 100.0 * opt_qty, 2)
-        pos_vega_vol = round((active_greeks["vega"] - short_greeks["vega"]) * 100.0 * opt_qty, 2)
-    else:
-        est_delta = float(active_greeks["delta"])
-        pos_theta_daily = round(active_greeks["theta"] * 100.0 * opt_qty, 2)
-        pos_vega_vol = round(active_greeks["vega"] * 100.0 * opt_qty, 2)
-    pos_delta_shares = round(est_delta * 100.0 * opt_qty, 0)
-
+    st.session_state.setdefault("dlg_tgt_val", float(tgt_p if leg_type == "CALL" else inv_p))
+    st.session_state.setdefault("dlg_stp_val", float(inv_p if leg_type == "CALL" else tgt_p))
     col_sim_tgt, col_sim_stp = st.columns(2)
     with col_sim_tgt:
-        tgt_val = st.number_input("1–5D Underlying Target ($)", value=float(tgt_p if leg_type == "CALL" else inv_p), step=0.5, format="%.2f", key="dlg_tgt_val")
+        tgt_val = st.number_input("1–5D Underlying Target ($)", step=0.5, format="%.2f", key="dlg_tgt_val")
     with col_sim_stp:
-        stp_val = st.number_input("Hard Stock Invalidation / Stop ($)", value=float(inv_p if leg_type == "CALL" else tgt_p), step=0.5, format="%.2f", key="dlg_stp_val")
+        stp_val = st.number_input("Hard Stock Invalidation / Stop ($)", step=0.5, format="%.2f", key="dlg_stp_val")
 
-    t_entry_dlg = max(1, leg_dte) / 365.0
-    t_exit_dlg = max(1, leg_dte - 4) / 365.0
-    if leg_type == "CALL":
-        bs_now_d, _ = rbe3.bs_call_price_delta(spot_price, leg_strike, t_entry_dlg, 0.0425, sigma_dlg)
-        bs_tgt_d, _ = rbe3.bs_call_price_delta(tgt_val, leg_strike, t_exit_dlg, 0.0425, sigma_dlg)
-        bs_stp_d, _ = rbe3.bs_call_price_delta(stp_val, leg_strike, t_exit_dlg, 0.0425, sigma_dlg)
-        target_intrinsic = max(0.0, tgt_val - leg_strike)
-        if is_spread_dlg and short_k_val is not None:
-            s_now_d, _ = rbe3.bs_call_price_delta(spot_price, short_k_val, t_entry_dlg, 0.0425, sigma_dlg)
-            s_tgt_d, _ = rbe3.bs_call_price_delta(tgt_val, short_k_val, t_exit_dlg, 0.0425, sigma_dlg)
-            s_stp_d, _ = rbe3.bs_call_price_delta(stp_val, short_k_val, t_exit_dlg, 0.0425, sigma_dlg)
-            bs_now_d = max(0.05, bs_now_d - s_now_d)
-            bs_tgt_d = max(0.01, min(abs(short_k_val - leg_strike), bs_tgt_d - s_tgt_d))
-            bs_stp_d = max(0.01, min(abs(short_k_val - leg_strike), bs_stp_d - s_stp_d))
-            target_intrinsic = max(0.0, min(abs(short_k_val - leg_strike), target_intrinsic - max(0.0, tgt_val - short_k_val)))
-    else:
-        bs_now_d, _ = rbe3.bs_put_price_delta(spot_price, leg_strike, t_entry_dlg, 0.0425, sigma_dlg)
-        bs_tgt_d, _ = rbe3.bs_put_price_delta(tgt_val, leg_strike, t_exit_dlg, 0.0425, sigma_dlg)
-        bs_stp_d, _ = rbe3.bs_put_price_delta(stp_val, leg_strike, t_exit_dlg, 0.0425, sigma_dlg)
-        target_intrinsic = max(0.0, leg_strike - tgt_val)
-        if is_spread_dlg and short_k_val is not None:
-            s_now_d, _ = rbe3.bs_put_price_delta(spot_price, short_k_val, t_entry_dlg, 0.0425, sigma_dlg)
-            s_tgt_d, _ = rbe3.bs_put_price_delta(tgt_val, short_k_val, t_exit_dlg, 0.0425, sigma_dlg)
-            s_stp_d, _ = rbe3.bs_put_price_delta(stp_val, short_k_val, t_exit_dlg, 0.0425, sigma_dlg)
-            bs_now_d = max(0.05, bs_now_d - s_now_d)
-            bs_tgt_d = max(0.01, min(abs(short_k_val - leg_strike), bs_tgt_d - s_tgt_d))
-            bs_stp_d = max(0.01, min(abs(short_k_val - leg_strike), bs_stp_d - s_stp_d))
-            target_intrinsic = max(0.0, min(abs(short_k_val - leg_strike), target_intrinsic - max(0.0, short_k_val - tgt_val)))
-
-    prem_scale_d = (opt_limit / bs_now_d) if bs_now_d > 0.05 else 1.0
-    opt_val_at_tgt = max(target_intrinsic, bs_tgt_d * prem_scale_d)
-    if is_spread_dlg and short_k_val is not None:
-        opt_val_at_tgt = min(abs(short_k_val - leg_strike), opt_val_at_tgt)
-    gross_payout_at_tgt = round(opt_qty * opt_val_at_tgt * 100.0, 2)
-    net_profit_at_tgt = round(gross_payout_at_tgt - total_debit, 2)
-    roi_at_tgt_pct = (net_profit_at_tgt / total_debit * 100.0) if total_debit > 0 else 0.0
-
-    opt_val_at_stop = max(0.01, bs_stp_d * prem_scale_d)
-    if is_spread_dlg and short_k_val is not None:
-        opt_val_at_stop = min(abs(short_k_val - leg_strike), opt_val_at_stop)
-    gross_val_at_stop = round(opt_qty * opt_val_at_stop * 100.0, 2)
-    est_loss_at_stop = round(max(0.0, total_debit - gross_val_at_stop), 2)
-    stop_loss_pct = (est_loss_at_stop / total_debit * 100.0) if total_debit > 0 else 100.0
+    pay_dlg = _compute_order_payoff_summary(
+        spot_price=spot_price,
+        strike_p=leg_strike,
+        limit_p=opt_limit,
+        qty=int(opt_qty),
+        dte=leg_dte,
+        sigma=sigma_dlg,
+        opt_type=leg_type,
+        opt_action=opt_action,
+        strategy=sel_strategy,
+        short_strike=short_k_val,
+        tgt_val=tgt_val,
+        stp_val=stp_val,
+    )
+    is_spread_dlg = pay_dlg["is_spread"]
+    is_sell_dlg = pay_dlg["is_sell"]
+    outlay_lbl = "Collateral / Risk Basis" if is_sell_dlg else "Cash Outlay (Max Risk)"
+    credit_note = f"Net Credit: +${pay_dlg['net_credit']:,.2f} &bull; " if is_sell_dlg else ""
 
     render_clean_html(f"""
     <div style="background: rgba(15, 18, 26, 0.68); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 14px 16px; margin: 12px 0;">
@@ -1283,30 +1401,30 @@ def render_schwab_order_dialog(active_leg: Dict[str, Any], cand_intel: Optional[
             <span style="font-size: 0.74rem; font-weight: 800; color: #FF8533; text-transform: uppercase; letter-spacing: 0.05em;">
                 <i class="fa-solid fa-chart-line fa-icon-inline"></i> Live Payoff What-If Matrix ({'Vertical Spread' if is_spread_dlg else 'Single Leg'})
             </span>
-            <span style="font-size: 0.70rem; color: #94A3B8;">{dte_rationale}</span>
+            <span style="font-size: 0.70rem; color: #94A3B8;">{_esc(dte_rationale)}</span>
         </div>
         <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px;">
             <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07); border-radius: 10px; padding: 9px 11px;">
-                <div style="font-size: 0.68rem; color: #94A3B8;">Cash Outlay (Max Risk)</div>
-                <div class="obs-mono" style="font-size: 0.98rem; font-weight: 800; color: #F1F5F9;">${total_debit:,.2f}</div>
-                <div style="font-size: 0.66rem; color: #64748B;">Includes $0.65/leg Schwab fee</div>
+                <div style="font-size: 0.68rem; color: #94A3B8;">{outlay_lbl}</div>
+                <div class="obs-mono" style="font-size: 0.98rem; font-weight: 800; color: #F1F5F9;">${pay_dlg['total_outlay']:,.2f}</div>
+                <div style="font-size: 0.66rem; color: #64748B;">{credit_note}Includes $0.65/leg Schwab fee</div>
             </div>
             <div style="background: rgba(16, 185, 129, 0.10); border: 1px solid rgba(16, 185, 129, 0.28); border-radius: 10px; padding: 9px 11px;">
                 <div style="font-size: 0.68rem; color: #34D399; font-weight: 700;">At Target (${tgt_val:.2f})</div>
-                <div class="obs-mono" style="font-size: 0.98rem; font-weight: 800; color: #34D399;">{'+' if net_profit_at_tgt>=0 else ''}${net_profit_at_tgt:,.2f}</div>
-                <div class="obs-mono" style="font-size: 0.66rem; color: #34D399;">{'+' if roi_at_tgt_pct>=0 else ''}{roi_at_tgt_pct:.1f}% ROI</div>
+                <div class="obs-mono" style="font-size: 0.98rem; font-weight: 800; color: #34D399;">{'+' if pay_dlg['net_profit_at_tgt']>=0 else ''}${pay_dlg['net_profit_at_tgt']:,.2f}</div>
+                <div class="obs-mono" style="font-size: 0.66rem; color: #34D399;">{'+' if pay_dlg['roi_at_tgt_pct']>=0 else ''}{pay_dlg['roi_at_tgt_pct']:.1f}% ROI</div>
             </div>
             <div style="background: rgba(244, 63, 94, 0.10); border: 1px solid rgba(244, 63, 94, 0.28); border-radius: 10px; padding: 9px 11px;">
                 <div style="font-size: 0.68rem; color: #FB7185; font-weight: 700;">At Stop (${stp_val:.2f})</div>
-                <div class="obs-mono" style="font-size: 0.98rem; font-weight: 800; color: #FB7185;">-${est_loss_at_stop:,.2f}</div>
-                <div class="obs-mono" style="font-size: 0.66rem; color: #FB7185;">-{stop_loss_pct:.1f}% Drawdown</div>
+                <div class="obs-mono" style="font-size: 0.98rem; font-weight: 800; color: #FB7185;">-${pay_dlg['est_loss_at_stop']:,.2f}</div>
+                <div class="obs-mono" style="font-size: 0.66rem; color: #FB7185;">-{pay_dlg['stop_loss_pct']:.1f}% Drawdown</div>
             </div>
         </div>
         <div class="obs-mono" style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 0.74rem; color: #CBD5E1; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px;">
-            <span>Breakeven: <b style="color: #FBBF24;">${be_price:.2f} ({be_pct:+.1f}%)</b></span>
-            <span>Net Delta: <b style="color: #F1F5F9;">{pos_delta_shares:+.0f} shares</b></span>
-            <span>Daily Theta: <b style="color: #FB7185;">${pos_theta_daily:+.2f}/d</b></span>
-            <span>Net Vega: <b style="color: #FF8533;">${pos_vega_vol:+.2f}/%</b></span>
+            <span>Breakeven: <b style="color: #FBBF24;">${pay_dlg['be_price']:.2f} ({pay_dlg['be_pct']:+.1f}%)</b></span>
+            <span>Net Delta: <b style="color: #F1F5F9;">{pay_dlg['pos_delta_shares']:+.0f} shares</b></span>
+            <span>Daily Theta: <b style="color: #FB7185;">${pay_dlg['pos_theta_daily']:+.2f}/d</b></span>
+            <span>Net Vega: <b style="color: #FF8533;">${pay_dlg['pos_vega_vol']:+.2f}/%</b></span>
         </div>
     </div>
     """)
@@ -1327,9 +1445,12 @@ def render_schwab_order_dialog(active_leg: Dict[str, Any], cand_intel: Optional[
     )
     st.plotly_chart(dlg_payoff_fig, width="stretch", config={"displayModeBar": False, "responsive": True})
 
+    st.session_state.setdefault(
+        "dlg_notes",
+        leg_notes or f"Simulated {leg_dte}-DTE {leg_type} trade on {leg_sym} ${leg_strike:.2f} (Conviction {score_200:+d}).",
+    )
     diary_notes_in = st.text_area(
         'Trading Diary Rationale ("Why am I taking this trade?")',
-        value=leg_notes or f"Simulated {leg_dte}-DTE {leg_type} trade on {leg_sym} ${leg_strike:.2f} (Conviction {score_200:+d}).",
         height=60,
         key="dlg_notes"
     )
@@ -1500,19 +1621,24 @@ def render_schwab_practice_diary_page():
     # Order Confirmation Receipt
     if "schwab_last_receipt" in st.session_state:
         rec = st.session_state["schwab_last_receipt"]
+        _rec_oid = _esc(rec.get("schwab_order_id", ""))
+        _rec_act = _esc(rec.get("action", ""))
+        _rec_sym = _esc(rec.get("symbol", ""))
+        _rec_exp = _esc(rec.get("expiration_date", ""))
+        _rec_type = _esc(rec.get("option_type", ""))
         render_clean_html(f"""
         <div class="schwab-receipt-banner">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;">
                 <div style="display: flex; align-items: center; gap: 8px;">
                     <span class="obs-pill-orange">CHARLES SCHWAB CONFIRMATION</span>
-                    <span style="font-weight: 800; font-size: 0.95rem; color: #F1F5F9;">Order ID: <code class="obs-mono">{rec['schwab_order_id']}</code></span>
+                    <span style="font-weight: 800; font-size: 0.95rem; color: #F1F5F9;">Order ID: <code class="obs-mono">{_rec_oid}</code></span>
                 </div>
                 <span style="background: rgba(16, 185, 129, 0.18); color: #34D399; border: 1px solid rgba(16, 185, 129, 0.42); font-size: 0.74rem; font-weight: 800; padding: 2px 10px; border-radius: 9999px;">
                     FILLED AT LIMIT
                 </span>
             </div>
             <div class="obs-mono" style="font-size: 0.82rem; color: #CBD5E1; line-height: 1.5;">
-                Simulated execution: <b style="color: #F8FAFC;">{rec['action']} {rec['quantity']} Contract(s) {rec['symbol']} {rec['expiration_date']} ${rec['strike']:.2f} {rec['option_type']}</b> @ <b style="color: #FF8533;">${rec['limit_price']:.2f}</b> Limit.<br>
+                Simulated execution: <b style="color: #F8FAFC;">{_rec_act} {rec['quantity']} Contract(s) {_rec_sym} {_rec_exp} ${rec['strike']:.2f} {_rec_type}</b> @ <b style="color: #FF8533;">${rec['limit_price']:.2f}</b> Limit.<br>
                 Total Debit: <b style="color: #F1F5F9;">${rec['total_cost']:.2f}</b> (includes ${rec['commission_fee']:.2f} Schwab fee). Stock spot at entry: <b>${rec['stock_price_at_entry']:.2f}</b>.
             </div>
         </div>
@@ -1520,30 +1646,6 @@ def render_schwab_practice_diary_page():
         if st.button("Dismiss Receipt", key="btn_dismiss_receipt"):
             del st.session_state["schwab_last_receipt"]
             st.rerun()
-        if st.session_state.get("enable_tactile_audio", True) and not st.session_state.get(f"chime_played_{rec['schwab_order_id']}", False):
-            st.session_state[f"chime_played_{rec['schwab_order_id']}"] = True
-            st.components.v1.html("""
-            <script>
-            (function() {
-                try {
-                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-                    const now = ctx.currentTime;
-                    [587.33, 880.0].forEach((freq, idx) => {
-                        const osc = ctx.createOscillator();
-                        const gain = ctx.createGain();
-                        osc.type = 'sine';
-                        osc.frequency.setValueAtTime(freq, now + idx * 0.09);
-                        gain.gain.setValueAtTime(0.08, now + idx * 0.09);
-                        gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.09 + 0.28);
-                        osc.connect(gain);
-                        gain.connect(ctx.destination);
-                        osc.start(now + idx * 0.09);
-                        osc.stop(now + idx * 0.09 + 0.30);
-                    });
-                } catch (e) {}
-            })();
-            </script>
-            """, height=0)
 
     # =========================================================================
     # STEP 2: ACTIVE TICKER SELECTION & COMPREHENSIVE INSTITUTIONAL INTEL COCKPIT
@@ -1563,8 +1665,11 @@ def render_schwab_practice_diary_page():
             exp_k = f"unified_chain_exp_{ext_sym}"
             if exp_k in st.session_state:
                 del st.session_state[exp_k]
+            st.session_state.pop(f"sb_{exp_k}", None)
             if "schwab_active_leg" in st.session_state:
                 del st.session_state["schwab_active_leg"]
+            st.session_state.pop("schwab_show_order_modal", None)
+            _reset_ticket_widget_state()
 
     if "sim_ticker_sym_unified" in st.session_state and st.session_state["sim_ticker_sym_unified"] != st.session_state["sim_active_symbol"]:
         st.session_state["sim_ticker_sym_unified"] = st.session_state["sim_active_symbol"]
@@ -1587,6 +1692,7 @@ def render_schwab_practice_diary_page():
         exp_k = f"unified_chain_exp_{target_sym}"
         if exp_k in st.session_state:
             del st.session_state[exp_k]
+        st.session_state.pop(f"sb_{exp_k}", None)
         st.session_state["schwab_prefill_needs_sync"] = True
         if sector_name:
             st.session_state["sim_selected_sector"] = _normalize_sector_safe(sector_name)
@@ -1597,6 +1703,8 @@ def render_schwab_practice_diary_page():
                     break
         if "schwab_active_leg" in st.session_state:
             del st.session_state["schwab_active_leg"]
+        st.session_state.pop("schwab_show_order_modal", None)
+        _reset_ticket_widget_state()
 
     sec_col1, sec_col2 = st.columns([1.8, 1.4], gap="medium")
     with sec_col1:
@@ -1798,24 +1906,34 @@ def render_schwab_practice_diary_page():
         if is_etf else ""
     )
 
+    _logo_safe = _safe_http_url(company_logo)
+    _sym_safe = _esc(active_sym)
+    _comp_safe = _esc(company_name)
+    _sec_safe = _esc(sector_name)
+    _mcap_safe = _esc(mkt_cap_str)
+    _ind_safe = _esc(industry_name)
+    _desc_short = (description[:110] + "...") if len(description) > 110 else description
+    _desc_safe = _esc(_desc_short)
+    _exp_lbl_safe = _esc(active_leg_obj.get("expiration_date", prefill.get("expiration_date", "Cycle")))
+
     # Obsidian Frosted-Glass Ticker HUD & Strike Risk Profile Visualizer
     render_clean_html(f"""
     <div class="schwab-strike-visualizer">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 12px;">
             <div style="display: flex; align-items: center; gap: 12px;">
-                <img src="{company_logo}" style="width: 44px; height: 44px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); object-fit: contain; background: rgba(10,12,18,0.85);" onerror="this.style.display='none'"/>
+                <img src="{_logo_safe}" style="width: 44px; height: 44px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); object-fit: contain; background: rgba(10,12,18,0.85);" onerror="this.style.display='none'"/>
                 <div>
                     <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span style="font-size: 1.50rem; font-weight: 800; color: #F1F5F9; letter-spacing: -0.02em;">{active_sym}</span>
-                        <span style="font-size: 0.95rem; font-weight: 600; color: #CBD5E1;">{company_name}</span>
+                        <span style="font-size: 1.50rem; font-weight: 800; color: #F1F5F9; letter-spacing: -0.02em;">{_sym_safe}</span>
+                        <span style="font-size: 0.95rem; font-weight: 600; color: #CBD5E1;">{_comp_safe}</span>
                         <span style="background: rgba(255, 255, 255, 0.06); color: #CBD5E1; border: 1px solid rgba(255, 255, 255, 0.12); font-size: 0.72rem; font-weight: 700; padding: 2px 9px; border-radius: 9999px;">
-                            {sector_name} &bull; {mkt_cap_str}
+                            {_sec_safe} &bull; {_mcap_safe}
                         </span>
                         {etf_pill_html}
                         {conv_badge_html}
                     </div>
                     <div style="font-size: 0.78rem; color: #94A3B8; margin-top: 4px;">
-                        {industry_name} &bull; <i>"{(description[:110] + '...') if len(description) > 110 else description}"</i>
+                        {_ind_safe} &bull; <i>"{_desc_safe}"</i>
                     </div>
                 </div>
             </div>
@@ -1833,11 +1951,11 @@ def render_schwab_practice_diary_page():
                     {setup_status_tag}
                 </span>
                 <span class="obs-mono" style="font-size: 1.25rem; font-weight: 800; color: {'#34D399' if is_call else '#FB7185'}; letter-spacing: -0.01em;">
-                    {active_sym} ${display_strike:.2f} {display_type}
+                    {_sym_safe} ${display_strike:.2f} {_esc(display_type)}
                 </span>
                 {dte_badge_html}
                 <span style="font-size: 0.82rem; color: #94A3B8; font-weight: 600;">
-                    (Exp: {active_leg_obj.get('expiration_date', prefill.get('expiration_date', 'Cycle'))})
+                    (Exp: {_exp_lbl_safe})
                 </span>
                 <span style="background: {moneyness_badge_bg}; color: {moneyness_badge_col}; border: 1px solid {moneyness_badge_col}40; font-size: 0.74rem; font-weight: 800; padding: 2px 8px; border-radius: 6px;">
                     {moneyness_tag}
@@ -1985,14 +2103,18 @@ def render_schwab_practice_diary_page():
             lbl_90d = f_90d.get("label", friday_labels[-1] if friday_labels else "")
 
             exp_key = f"unified_chain_exp_{active_sym}"
+            sb_exp_key = f"sb_{exp_key}"
             needs_sync = st.session_state.pop("schwab_prefill_needs_sync", False)
             if needs_sync or exp_key not in st.session_state or st.session_state[exp_key] not in friday_labels:
                 st.session_state[exp_key] = friday_labels[default_fri_idx] if (friday_labels and default_fri_idx < len(friday_labels)) else (friday_labels[0] if friday_labels else "")
 
             curr_exp_selected = st.session_state.get(exp_key, friday_labels[default_fri_idx] if friday_labels else "")
+            if needs_sync or sb_exp_key not in st.session_state or st.session_state[sb_exp_key] not in friday_labels:
+                st.session_state[sb_exp_key] = curr_exp_selected
 
             def on_select_dte_horizon(target_label: str, sym: str):
                 st.session_state[f"unified_chain_exp_{sym}"] = target_label
+                st.session_state[f"sb_unified_chain_exp_{sym}"] = target_label
                 meta = next((f for f in fridays_90d if f.get("label") == target_label), None)
                 if meta:
                     target_d = int(meta.get("dte", 35))
@@ -2023,12 +2145,10 @@ def render_schwab_practice_diary_page():
 
             col_exp_sel, col_span_sel = st.columns([1.8, 1.2])
             with col_exp_sel:
-                default_idx = friday_labels.index(curr_exp_selected) if curr_exp_selected in friday_labels else 0
                 selected_exp_label = st.selectbox(
                     "Expiration Cycle (Cached OPRA)",
                     options=friday_labels,
-                    index=default_idx,
-                    key=f"sb_{exp_key}"
+                    key=sb_exp_key,
                 )
                 if selected_exp_label != curr_exp_selected:
                     st.session_state[exp_key] = selected_exp_label
@@ -2038,11 +2158,11 @@ def render_schwab_practice_diary_page():
                 active_iso_date = selected_fri_meta.get("iso_date", active_exp_date)
 
             with col_span_sel:
+                st.session_state.setdefault("unified_chain_span", "All Strikes (±20%)")
                 moneyness_view = st.selectbox(
                     "Strike Span",
                     options=["All Strikes (±20%)", "Near the Money (±10%)", "Deep Convexity (±25%)"],
-                    index=0,
-                    key="unified_chain_span"
+                    key="unified_chain_span",
                 )
                 span_pct = 10.0 if "10%" in moneyness_view else (25.0 if "25%" in moneyness_view else 20.0)
 
@@ -2099,6 +2219,7 @@ def render_schwab_practice_diary_page():
                 with rc1:
                     btn_c_txt = f"⚡ CALL ${c_mark:.2f}" if is_armed_call else f"Call ${c_mark:.2f}"
                     if st.button(btn_c_txt, key=f"chain_call_{k}_{active_dte}", width="stretch", type="primary" if is_armed_call else "secondary", help=c_help):
+                        _reset_ticket_widget_state()
                         c_score_200 = abs(int(base_s200)) if base_s200 is not None else 0
                         leg_payload = {
                             "symbol": active_sym,
@@ -2125,14 +2246,16 @@ def render_schwab_practice_diary_page():
                         st.session_state["schwab_active_leg"] = leg_payload
                         st.session_state["schwab_prefill"] = leg_payload
                         st.session_state["ticket_strike_rail"] = float(k)
-                        st.session_state["ticket_limit_rail"] = round(float(c_mark), 2)
+                        st.session_state["ticket_limit_rail"] = max(0.01, round(float(c_mark), 2))
                         st.session_state["ticket_type_rail"] = "CALL"
                         st.session_state["ticket_action_rail"] = "BUY_TO_OPEN"
+                        st.session_state["ticket_strategy_rail"] = "SINGLE_LEG"
+                        st.session_state["ticket_qty_rail"] = 1
                         st.session_state["ticket_tgt_spot_rail"] = float(tgt_p)
                         st.session_state["ticket_stp_spot_rail"] = float(inv_p)
                         st.session_state["ticket_dte_rail"] = int(active_dte)
                         st.session_state["ticket_exp_rail"] = active_exp_date
-                        st.session_state["dlg_limit"] = round(float(c_mark), 2)
+                        st.session_state["dlg_limit"] = max(0.01, round(float(c_mark), 2))
                         st.session_state["dlg_qty"] = 1
                         st.session_state["schwab_show_order_modal"] = True
                         st.rerun()
@@ -2156,6 +2279,7 @@ def render_schwab_practice_diary_page():
                 with rc5:
                     btn_p_txt = f"⚡ PUT ${p_mark:.2f}" if is_armed_put else f"Put ${p_mark:.2f}"
                     if st.button(btn_p_txt, key=f"chain_put_{k}_{active_dte}", width="stretch", type="primary" if is_armed_put else "secondary", help=p_help):
+                        _reset_ticket_widget_state()
                         p_score_200 = -abs(int(base_s200)) if base_s200 is not None else 0
                         leg_payload = {
                             "symbol": active_sym,
@@ -2182,14 +2306,16 @@ def render_schwab_practice_diary_page():
                         st.session_state["schwab_active_leg"] = leg_payload
                         st.session_state["schwab_prefill"] = leg_payload
                         st.session_state["ticket_strike_rail"] = float(k)
-                        st.session_state["ticket_limit_rail"] = round(float(p_mark), 2)
+                        st.session_state["ticket_limit_rail"] = max(0.01, round(float(p_mark), 2))
                         st.session_state["ticket_type_rail"] = "PUT"
                         st.session_state["ticket_action_rail"] = "BUY_TO_OPEN"
+                        st.session_state["ticket_strategy_rail"] = "SINGLE_LEG"
+                        st.session_state["ticket_qty_rail"] = 1
                         st.session_state["ticket_tgt_spot_rail"] = float(inv_p)
                         st.session_state["ticket_stp_spot_rail"] = float(tgt_p)
                         st.session_state["ticket_dte_rail"] = int(active_dte)
                         st.session_state["ticket_exp_rail"] = active_exp_date
-                        st.session_state["dlg_limit"] = round(float(p_mark), 2)
+                        st.session_state["dlg_limit"] = max(0.01, round(float(p_mark), 2))
                         st.session_state["dlg_qty"] = 1
                         st.session_state["schwab_show_order_modal"] = True
                         st.rerun()
@@ -2248,7 +2374,7 @@ def render_schwab_practice_diary_page():
                         <div style="display: flex; gap: 6px; flex-wrap: wrap;">{rail_conv_badge}{rail_dte_badge}</div>
                     </div>
                     <div class="obs-mono" style="font-size: 0.96rem; font-weight: 800; color: {'#34D399' if leg_type == 'CALL' else '#FB7185'}; margin-top: 6px;">
-                        {leg_action} {leg_sym} {leg_exp} ${leg_strike:.2f} {leg_type}
+                        {_esc(leg_action)} {_esc(leg_sym)} {_esc(leg_exp)} ${leg_strike:.2f} {_esc(leg_type)}
                         <span style="font-size: 0.78rem; color: #FF8533; font-weight: 700; margin-left: 6px;">({leg_dte} DTE)</span>
                     </div>
                     <div class="obs-mono" style="font-size: 0.72rem; color: #CBD5E1; margin-top: 6px; display: flex; justify-content: space-between; align-items: center;">
@@ -2260,12 +2386,49 @@ def render_schwab_practice_diary_page():
             """)
 
             with st.container():
+                _rail_def_strat = str(active_leg.get("strategy") or prefill.get("strategy") or "SINGLE_LEG").upper()
+                if _rail_def_strat not in ("SINGLE_LEG", "VERTICAL_DEBIT_SPREAD"):
+                    _rail_def_strat = "SINGLE_LEG"
+                _def_action_rail = "BUY_TO_OPEN" if "BUY" in leg_action.upper() else "SELL_TO_OPEN"
+                _def_type_rail = "CALL" if leg_type == "CALL" else "PUT"
+                _def_strike_rail = float(leg_strike)
+                _def_k2_raw = active_leg.get("short_strike") or prefill.get("short_strike")
+                if not _def_k2_raw or float(_def_k2_raw) <= 0:
+                    _def_k2_rail = round(_def_strike_rail * (1.05 if _def_type_rail == "CALL" else 0.95), 1)
+                else:
+                    _def_k2_rail = float(_def_k2_raw)
+                _def_notes_rail = leg_notes or f"Simulated {active_dte}-DTE trade on {leg_sym}. Testing asymmetric convexity on {active_exp_date} ${_def_strike_rail:.2f} {_def_type_rail}."
+                _def_conv_rail = max(-200, min(200, int(rail_s200)))
+
+                st.session_state.setdefault("ticket_action_rail", _def_action_rail)
+                st.session_state.setdefault("ticket_type_rail", _def_type_rail)
+                st.session_state.setdefault("ticket_strategy_rail", _rail_def_strat)
+                st.session_state.setdefault("ticket_tif_rail", "Good 'Til Canceled (GTC)")
+                st.session_state.setdefault("ticket_strike_rail", _def_strike_rail)
+                st.session_state.setdefault("ticket_short_strike_rail", float(_def_k2_rail))
+                st.session_state.setdefault("ticket_qty_rail", 1)
+                st.session_state.setdefault("ticket_ord_type_rail", "LIMIT")
+                st.session_state.setdefault("ticket_limit_rail", max(0.01, round(float(leg_limit), 2)))
+                st.session_state.setdefault("ticket_tgt_spot_rail", float(leg_tgt))
+                st.session_state.setdefault("ticket_stp_spot_rail", float(leg_stop))
+                st.session_state.setdefault("ticket_notes_rail", _def_notes_rail)
+                st.session_state.setdefault("ticket_conv_rail", _def_conv_rail)
+
+                def _set_rail_qty(val: int) -> None:
+                    st.session_state["ticket_qty_rail"] = int(max(1, min(500, val)))
+
+                def _step_rail_qty(delta: int) -> None:
+                    curr_q = int(st.session_state.get("ticket_qty_rail", 1) or 1)
+                    st.session_state["ticket_qty_rail"] = int(max(1, min(500, curr_q + delta)))
+
+                def _set_rail_limit(px: float) -> None:
+                    st.session_state["ticket_limit_rail"] = max(0.01, round(float(px), 2))
+
                 col_tk_act, col_tk_type = st.columns(2)
                 with col_tk_act:
                     opt_action = st.radio(
                         "Action",
                         options=["BUY_TO_OPEN", "SELL_TO_OPEN"],
-                        index=0 if "BUY" in leg_action else 1,
                         horizontal=True,
                         key="ticket_action_rail"
                     )
@@ -2273,27 +2436,21 @@ def render_schwab_practice_diary_page():
                     opt_type_sel = st.radio(
                         "Leg Type",
                         options=["CALL", "PUT"],
-                        index=0 if leg_type == "CALL" else 1,
                         horizontal=True,
                         key="ticket_type_rail"
                     )
 
-                _rail_def_strat = str(active_leg.get("strategy") or prefill.get("strategy") or "SINGLE_LEG").upper()
-                if _rail_def_strat not in ("SINGLE_LEG", "VERTICAL_DEBIT_SPREAD"):
-                    _rail_def_strat = "SINGLE_LEG"
                 col_tk_strat, col_tk_tif = st.columns(2)
                 with col_tk_strat:
                     opt_strat_rail = st.selectbox(
                         "Strategy Structure",
                         options=["SINGLE_LEG", "VERTICAL_DEBIT_SPREAD"],
-                        index=1 if _rail_def_strat == "VERTICAL_DEBIT_SPREAD" else 0,
                         key="ticket_strategy_rail",
                     )
                 with col_tk_tif:
                     st.selectbox(
                         "Timing / Duration",
                         options=["Good 'Til Canceled (GTC)", "Day"],
-                        index=0,
                         key="ticket_tif_rail"
                     )
 
@@ -2301,22 +2458,17 @@ def render_schwab_practice_diary_page():
                 with col_tk_k:
                     opt_strike_in = st.number_input(
                         "Strike ($)",
-                        value=float(st.session_state.get("ticket_strike_rail", leg_strike)),
                         step=1.0,
                         format="%.2f",
                         key="ticket_strike_rail"
                     )
                 with col_tk_k2:
                     if opt_strat_rail == "VERTICAL_DEBIT_SPREAD":
-                        _def_k2 = active_leg.get("short_strike") or prefill.get("short_strike")
-                        if not _def_k2 or float(_def_k2) <= 0:
-                            _def_k2 = round(float(opt_strike_in) * (1.05 if opt_type_sel == "CALL" else 0.95), 1)
                         opt_short_k_rail: Optional[float] = float(
                             st.number_input(
                                 "Short Strike K2 ($)",
                                 min_value=0.5,
                                 max_value=5000.0,
-                                value=float(_def_k2),
                                 step=0.5,
                                 format="%.2f",
                                 key="ticket_short_strike_rail",
@@ -2331,55 +2483,62 @@ def render_schwab_practice_diary_page():
                 qty_presets = [1, 2, 5, 10, 25, 50]
                 for q_idx, q_val in enumerate(qty_presets):
                     with chip_q_cols[q_idx]:
-                        if st.button(f"{q_val}x", key=f"btn_quick_qty_{q_val}", width="stretch"):
-                            st.session_state["ticket_qty_rail"] = q_val
-                            st.rerun()
+                        st.button(
+                            f"{q_val}x",
+                            key=f"btn_quick_qty_{q_val}",
+                            width="stretch",
+                            on_click=_set_rail_qty,
+                            args=(q_val,),
+                        )
 
                 col_dec, col_q_in, col_inc = st.columns([1, 2.8, 1])
                 with col_dec:
-                    if st.button("➖", key="btn_dec_qty", width="stretch", help="Decrease 1 contract"):
-                        curr_q = int(st.session_state.get("ticket_qty_rail", 1))
-                        st.session_state["ticket_qty_rail"] = max(1, curr_q - 1)
-                        st.rerun()
+                    st.button(
+                        "➖",
+                        key="btn_dec_qty",
+                        width="stretch",
+                        help="Decrease 1 contract",
+                        on_click=_step_rail_qty,
+                        args=(-1,),
+                    )
                 with col_q_in:
                     opt_qty_in = st.number_input(
                         "Contracts",
                         min_value=1,
                         max_value=500,
-                        value=int(st.session_state.get("ticket_qty_rail", 1)),
                         step=1,
                         key="ticket_qty_rail",
                         label_visibility="collapsed"
                     )
                 with col_inc:
-                    if st.button("➕", key="btn_inc_qty", width="stretch", help="Increase 1 contract"):
-                        curr_q = int(st.session_state.get("ticket_qty_rail", 1))
-                        st.session_state["ticket_qty_rail"] = min(500, curr_q + 1)
-                        st.rerun()
+                    st.button(
+                        "➕",
+                        key="btn_inc_qty",
+                        width="stretch",
+                        help="Increase 1 contract",
+                        on_click=_step_rail_qty,
+                        args=(1,),
+                    )
 
-                st.markdown(f"<div class='obs-mono' style='font-size: 0.74rem; color: #FF8533; font-weight: 700; margin-top: -6px; margin-bottom: 8px;'>Controls {int(opt_qty_in) * 100:,} Shares of {leg_sym}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='obs-mono' style='font-size: 0.74rem; color: #FF8533; font-weight: 700; margin-top: -6px; margin-bottom: 8px;'>Controls {int(opt_qty_in) * 100:,} Shares of {_esc(leg_sym)}</div>", unsafe_allow_html=True)
 
                 st.markdown("<div style='font-size: 0.72rem; font-weight: 700; color: #94A3B8; margin-top: 2px; margin-bottom: 2px;'>LIMIT PRICE &amp; SPREAD EXECUTION</div>", unsafe_allow_html=True)
                 chip_p_cols = st.columns(3)
                 with chip_p_cols[0]:
-                    if leg_bid > 0 and st.button(f"Bid ${leg_bid:.2f}", key="btn_chip_bid", width="stretch"):
-                        st.session_state["ticket_limit_rail"] = float(leg_bid)
-                        st.rerun()
+                    if leg_bid > 0:
+                        st.button(f"Bid ${leg_bid:.2f}", key="btn_chip_bid", width="stretch", on_click=_set_rail_limit, args=(leg_bid,))
                 with chip_p_cols[1]:
-                    if leg_limit > 0 and st.button(f"Mid ${leg_limit:.2f}", key="btn_chip_mid", width="stretch"):
-                        st.session_state["ticket_limit_rail"] = float(leg_limit)
-                        st.rerun()
+                    if leg_limit > 0:
+                        st.button(f"Mid ${leg_limit:.2f}", key="btn_chip_mid", width="stretch", on_click=_set_rail_limit, args=(leg_limit,))
                 with chip_p_cols[2]:
-                    if leg_ask > 0 and st.button(f"Ask ${leg_ask:.2f}", key="btn_chip_ask", width="stretch"):
-                        st.session_state["ticket_limit_rail"] = float(leg_ask)
-                        st.rerun()
+                    if leg_ask > 0:
+                        st.button(f"Ask ${leg_ask:.2f}", key="btn_chip_ask", width="stretch", on_click=_set_rail_limit, args=(leg_ask,))
 
                 col_tk_ord, col_tk_lim = st.columns(2)
                 with col_tk_ord:
                     opt_ord_type = st.selectbox(
                         "Order Type",
                         options=["LIMIT", "MARKET", "STOP ON QUOTE"],
-                        index=0,
                         key="ticket_ord_type_rail"
                     )
                 with col_tk_lim:
@@ -2387,7 +2546,6 @@ def render_schwab_practice_diary_page():
                         "Limit Price ($)",
                         min_value=0.01,
                         max_value=2500.0,
-                        value=round(float(st.session_state.get("ticket_limit_rail", max(0.01, leg_limit))), 2),
                         step=0.01,
                         format="%.2f",
                         key="ticket_limit_rail"
@@ -2397,7 +2555,6 @@ def render_schwab_practice_diary_page():
                 with col_r_tgt:
                     in_tgt_val = st.number_input(
                         "Target Stock ($)",
-                        value=float(st.session_state.get("ticket_tgt_spot_rail", leg_tgt)),
                         step=1.0,
                         format="%.2f",
                         key="ticket_tgt_spot_rail"
@@ -2405,7 +2562,6 @@ def render_schwab_practice_diary_page():
                 with col_r_stp:
                     in_stp_val = st.number_input(
                         "Stop Stock ($)",
-                        value=float(st.session_state.get("ticket_stp_spot_rail", leg_stop)),
                         step=1.0,
                         format="%.2f",
                         key="ticket_stp_spot_rail"
@@ -2415,93 +2571,42 @@ def render_schwab_practice_diary_page():
                 limit_p = float(opt_limit_in)
                 strike_p = float(opt_strike_in)
                 shares_ctrl = qty * 100
-                is_spread_rail = (opt_strat_rail == "VERTICAL_DEBIT_SPREAD") and (opt_short_k_rail is not None) and (abs(opt_short_k_rail - strike_p) > 0.01)
-
-                schwab_comm = round(qty * 0.65 * (2 if is_spread_rail else 1), 2)
-                gross_principal = round(qty * limit_p * 100.0, 2)
-                total_max_risk = round(gross_principal + schwab_comm, 2)
-
-                if opt_type_sel == "CALL":
-                    be_price = round(strike_p + limit_p + (0.65 / 100.0), 2)
-                else:
-                    be_price = round(strike_p - limit_p - (0.65 / 100.0), 2)
-                be_diff = be_price - spot_price
-                be_pct = (be_diff / spot_price) * 100.0 if spot_price > 0 else 0.0
-
                 tgt_spot = float(in_tgt_val)
                 stp_spot = float(in_stp_val)
                 raw_ticket_iv = float(active_leg.get("iv", display_iv))
                 sigma_ticket = raw_ticket_iv / 100.0 if raw_ticket_iv > 3.0 else max(0.15, raw_ticket_iv)
-                t_entry_tk = max(1, leg_dte) / 365.0
-                t_exit_tk = max(1, leg_dte - 4) / 365.0
 
-                if opt_type_sel == "CALL":
-                    bs_now_tk, _ = rbe3.bs_call_price_delta(spot_price, strike_p, t_entry_tk, 0.0425, sigma_ticket)
-                    bs_tgt_tk, _ = rbe3.bs_call_price_delta(tgt_spot, strike_p, t_exit_tk, 0.0425, sigma_ticket)
-                    bs_stp_tk, _ = rbe3.bs_call_price_delta(stp_spot, strike_p, t_exit_tk, 0.0425, sigma_ticket)
-                    target_intrinsic = max(0.0, tgt_spot - strike_p)
-                    if is_spread_rail and opt_short_k_rail is not None:
-                        s_now_tk, _ = rbe3.bs_call_price_delta(spot_price, opt_short_k_rail, t_entry_tk, 0.0425, sigma_ticket)
-                        s_tgt_tk, _ = rbe3.bs_call_price_delta(tgt_spot, opt_short_k_rail, t_exit_tk, 0.0425, sigma_ticket)
-                        s_stp_tk, _ = rbe3.bs_call_price_delta(stp_spot, opt_short_k_rail, t_exit_tk, 0.0425, sigma_ticket)
-                        bs_now_tk = max(0.05, bs_now_tk - s_now_tk)
-                        bs_tgt_tk = max(0.01, min(abs(opt_short_k_rail - strike_p), bs_tgt_tk - s_tgt_tk))
-                        bs_stp_tk = max(0.01, min(abs(opt_short_k_rail - strike_p), bs_stp_tk - s_stp_tk))
-                        target_intrinsic = max(0.0, min(abs(opt_short_k_rail - strike_p), target_intrinsic - max(0.0, tgt_spot - opt_short_k_rail)))
-                else:
-                    bs_now_tk, _ = rbe3.bs_put_price_delta(spot_price, strike_p, t_entry_tk, 0.0425, sigma_ticket)
-                    bs_tgt_tk, _ = rbe3.bs_put_price_delta(tgt_spot, strike_p, t_exit_tk, 0.0425, sigma_ticket)
-                    bs_stp_tk, _ = rbe3.bs_put_price_delta(stp_spot, strike_p, t_exit_tk, 0.0425, sigma_ticket)
-                    target_intrinsic = max(0.0, strike_p - tgt_spot)
-                    if is_spread_rail and opt_short_k_rail is not None:
-                        s_now_tk, _ = rbe3.bs_put_price_delta(spot_price, opt_short_k_rail, t_entry_tk, 0.0425, sigma_ticket)
-                        s_tgt_tk, _ = rbe3.bs_put_price_delta(tgt_spot, opt_short_k_rail, t_exit_tk, 0.0425, sigma_ticket)
-                        s_stp_tk, _ = rbe3.bs_put_price_delta(stp_spot, opt_short_k_rail, t_exit_tk, 0.0425, sigma_ticket)
-                        bs_now_tk = max(0.05, bs_now_tk - s_now_tk)
-                        bs_tgt_tk = max(0.01, min(abs(opt_short_k_rail - strike_p), bs_tgt_tk - s_tgt_tk))
-                        bs_stp_tk = max(0.01, min(abs(opt_short_k_rail - strike_p), bs_stp_tk - s_stp_tk))
-                        target_intrinsic = max(0.0, min(abs(opt_short_k_rail - strike_p), target_intrinsic - max(0.0, opt_short_k_rail - tgt_spot)))
-
-                prem_scale_tk = (limit_p / bs_now_tk) if bs_now_tk > 0.05 else 1.0
-                opt_val_at_tgt_tk = max(target_intrinsic, bs_tgt_tk * prem_scale_tk)
-                if is_spread_rail and opt_short_k_rail is not None:
-                    opt_val_at_tgt_tk = min(abs(opt_short_k_rail - strike_p), opt_val_at_tgt_tk)
-                gross_payout_at_tgt = round(qty * opt_val_at_tgt_tk * 100.0, 2)
-                net_profit_at_tgt = round(gross_payout_at_tgt - total_max_risk, 2)
-                roi_at_tgt_pct = (net_profit_at_tgt / total_max_risk * 100.0) if total_max_risk > 0 else 0.0
-
-                active_greeks = _exact_leg_greeks(
-                    s=spot_price,
-                    k=strike_p,
-                    t=t_entry_tk,
-                    r=0.0425,
+                pay_rail = _compute_order_payoff_summary(
+                    spot_price=spot_price,
+                    strike_p=strike_p,
+                    limit_p=limit_p,
+                    qty=qty,
+                    dte=leg_dte,
                     sigma=sigma_ticket,
-                    opt_type=opt_type_sel
+                    opt_type=opt_type_sel,
+                    opt_action=opt_action,
+                    strategy=opt_strat_rail,
+                    short_strike=opt_short_k_rail,
+                    tgt_val=tgt_spot,
+                    stp_val=stp_spot,
                 )
-                if is_spread_rail and opt_short_k_rail is not None:
-                    short_greeks_tk = _exact_leg_greeks(
-                        s=spot_price,
-                        k=opt_short_k_rail,
-                        t=t_entry_tk,
-                        r=0.0425,
-                        sigma=sigma_ticket,
-                        opt_type=opt_type_sel,
-                    )
-                    est_leg_delta = float(active_greeks["delta"] - short_greeks_tk["delta"])
-                    pos_theta_daily = round((active_greeks["theta"] - short_greeks_tk["theta"]) * 100.0 * qty, 2)
-                    pos_vega_vol = round((active_greeks["vega"] - short_greeks_tk["vega"]) * 100.0 * qty, 2)
-                else:
-                    est_leg_delta = float(active_greeks["delta"])
-                    pos_theta_daily = round(active_greeks["theta"] * 100.0 * qty, 2)
-                    pos_vega_vol = round(active_greeks["vega"] * 100.0 * qty, 2)
-                opt_val_at_stop = max(0.01, bs_stp_tk * prem_scale_tk)
-                if is_spread_rail and opt_short_k_rail is not None:
-                    opt_val_at_stop = min(abs(opt_short_k_rail - strike_p), opt_val_at_stop)
-                gross_val_at_stop = round(qty * opt_val_at_stop * 100.0, 2)
-                est_loss_at_stop = round(max(0.0, total_max_risk - gross_val_at_stop), 2)
-                stop_loss_pct = (est_loss_at_stop / total_max_risk * 100.0) if total_max_risk > 0 else 100.0
-
-                pos_delta_shares = round(est_leg_delta * 100.0 * qty, 1)
+                is_spread_rail = pay_rail["is_spread"]
+                is_sell_rail = pay_rail["is_sell"]
+                schwab_comm = pay_rail["schwab_comm"]
+                gross_principal = round(qty * limit_p * 100.0, 2)
+                total_max_risk = pay_rail["total_outlay"]
+                be_price = pay_rail["be_price"]
+                be_diff = be_price - spot_price
+                be_pct = pay_rail["be_pct"]
+                net_profit_at_tgt = pay_rail["net_profit_at_tgt"]
+                roi_at_tgt_pct = pay_rail["roi_at_tgt_pct"]
+                est_loss_at_stop = pay_rail["est_loss_at_stop"]
+                stop_loss_pct = pay_rail["stop_loss_pct"]
+                pos_delta_shares = pay_rail["pos_delta_shares"]
+                pos_theta_daily = pay_rail["pos_theta_daily"]
+                pos_vega_vol = pay_rail["pos_vega_vol"]
+                outlay_label_rail = "Collateral / Risk Basis:" if is_sell_rail else "Total Cash Outlay (Max Risk):"
+                principal_label_rail = "Gross Credit Proceeds:" if is_sell_rail else "Gross Principal Debit:"
 
                 render_clean_html(f"""
                 <div class="obs-glass-card" style="padding: 14px 16px; margin: 12px 0;">
@@ -2514,7 +2619,7 @@ def render_schwab_practice_diary_page():
                         <b style="color: #F1F5F9;">{qty} ct ({shares_ctrl:,} sh)</b>
                     </div>
                     <div class="obs-mono" style="display: flex; justify-content: space-between; font-size: 0.80rem; margin-bottom: 6px;">
-                        <span style="color: #94A3B8;">Gross Principal Debit:</span>
+                        <span style="color: #94A3B8;">{principal_label_rail}</span>
                         <b style="color: #F1F5F9;">${gross_principal:,.2f}</b>
                     </div>
                     <div class="obs-mono" style="display: flex; justify-content: space-between; font-size: 0.80rem; margin-bottom: 6px;">
@@ -2522,7 +2627,7 @@ def render_schwab_practice_diary_page():
                         <b style="color: #CBD5E1;">${schwab_comm:.2f}</b>
                     </div>
                     <div class="obs-mono" style="display: flex; justify-content: space-between; font-size: 0.88rem; font-weight: 800; background: rgba(255, 107, 0, 0.14); padding: 7px 10px; border-radius: 8px; margin-bottom: 8px; border: 1px solid rgba(255, 107, 0, 0.34);">
-                        <span style="color: #FF8533;">Total Cash Outlay (Max Risk):</span>
+                        <span style="color: #FF8533;">{outlay_label_rail}</span>
                         <b style="color: #F1F5F9;">${total_max_risk:,.2f}</b>
                     </div>
                     <div class="obs-mono" style="display: flex; justify-content: space-between; font-size: 0.80rem; margin-bottom: 6px;">
@@ -2544,18 +2649,28 @@ def render_schwab_practice_diary_page():
                     </div>
                 </div>
                 """)
+                _spr_pct_rail = ((leg_ask - leg_bid) / max(0.01, leg_limit) * 100.0) if (leg_ask > leg_bid > 0 and leg_limit > 0) else 4.0
+                _edu.render_edu_drawer(
+                    "schwab_ticket",
+                    live_ctx={
+                        "symbol": leg_sym,
+                        "strategy": opt_strat_rail,
+                        "dte": leg_dte,
+                        "spread_pct": _spr_pct_rail,
+                        "be_pct": be_pct,
+                        "daily_theta": pos_theta_daily,
+                    },
+                )
 
                 in_notes_rail = st.text_area(
                     'Trading Diary Thesis Notes ("Why am I taking this trade?")',
-                    value=leg_notes or f"Simulated {active_dte}-DTE trade on {leg_sym}. Testing asymmetric convexity on {active_exp_date} ${opt_strike_in:.2f} {opt_type_sel}.",
                     height=65,
                     key="ticket_notes_rail"
                 )
 
                 col_c_slider, col_c_btn = st.columns([1.8, 1.2])
                 with col_c_slider:
-                    slider_default = max(-200, min(200, int(rail_s200)))
-                    in_conv_rail = st.slider("Conviction (-200..+200)", min_value=-200, max_value=200, value=slider_default, key="ticket_conv_rail")
+                    in_conv_rail = st.slider("Conviction (-200..+200)", min_value=-200, max_value=200, key="ticket_conv_rail")
                 with col_c_btn:
                     st.write("")
                     submit_schwab_order = st.button("⚡ Transmit to Schwab", type="primary", width="stretch", key="btn_submit_unified_schwab")
@@ -2588,7 +2703,7 @@ def render_schwab_practice_diary_page():
                     st.success(f"Order {trade_res['schwab_order_id']} confirmed!")
                     st.rerun()
 
-        if st.session_state.get("schwab_show_order_modal", False) and "schwab_active_leg" in st.session_state:
+        if st.session_state.pop("schwab_show_order_modal", False) and "schwab_active_leg" in st.session_state:
             render_schwab_order_dialog(st.session_state["schwab_active_leg"], cand_intel)
 
         st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
@@ -2686,13 +2801,21 @@ def render_schwab_practice_diary_page():
                 elif t_stop and ((t_type == "CALL" and t_cur_spot <= t_stop) or (t_type == "PUT" and t_cur_spot >= t_stop)):
                     status_badge = '<span style="background: rgba(244, 63, 94, 0.18); color: #FB7185; border: 1px solid rgba(244, 63, 94, 0.45); font-size: 0.72rem; font-weight: 800; padding: 2px 8px; border-radius: 9999px;">STOP-LOSS HIT</span>'
 
+                _t_sym_s = _esc(t_sym)
+                _t_act_s = _esc(t_act)
+                _t_exp_s = _esc(t_exp)
+                _t_type_s = _esc(t_type)
+                _t_spread_s = _esc(t_spread_tag)
+                _t_notes_trunc = (t_notes[:140] + "...") if len(t_notes) > 140 else t_notes
+                _t_notes_s = _esc(_t_notes_trunc)
+
                 render_clean_html(f"""
                 <div class="schwab-pos-card">
                     <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;">
                         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                            <span style="font-size: 1.15rem; font-weight: 800; color: #F1F5F9;">{t_sym}</span>
+                            <span style="font-size: 1.15rem; font-weight: 800; color: #F1F5F9;">{_t_sym_s}</span>
                             <span class="obs-mono" style="background: rgba(255, 107, 0, 0.14); color: #FF8533; border: 1px solid rgba(255, 107, 0, 0.36); font-size: 0.74rem; font-weight: 700; padding: 2px 9px; border-radius: 9999px;">
-                                {t_act} {t_qty}x {t_exp} ${t_strike:.2f} {t_type} {t_spread_tag}
+                                {_t_act_s} {t_qty}x {_t_exp_s} ${t_strike:.2f} {_t_type_s} {_t_spread_s}
                             </span>
                             {conv_pill}
                             {dte_pill}
@@ -2714,7 +2837,7 @@ def render_schwab_practice_diary_page():
                         <div>Net &Delta; / &Theta; / V: <b style="color: #FF8533;">{t_net_d:+.0f}sh &bull; ${t_net_th:+.1f}/d &bull; ${t_net_vg:+.1f}/v</b></div>
                     </div>
                     <div style="font-size: 0.75rem; color: #94A3B8; font-style: italic;">
-                        "{(t_notes[:140] + '...') if len(t_notes) > 140 else t_notes}"
+                        "{_t_notes_s}"
                     </div>
                 </div>
                 """)
@@ -3009,7 +3132,7 @@ def render_daily_recommendation_ledger_page():
         sectors_in_snap.setdefault(sec, []).append(r)
 
     for sec_name, rec_list in sectors_in_snap.items():
-        st.markdown(f"#### <i class='fa-solid fa-layer-group' style='color:#FF8533;'></i> {sec_name}", unsafe_allow_html=True)
+        st.markdown(f"#### <i class='fa-solid fa-layer-group' style='color:#FF8533;'></i> {_esc(sec_name)}", unsafe_allow_html=True)
         for rec_idx, r in enumerate(rec_list):
             rank = r["rank"]
             sym = r["symbol"]
@@ -3067,10 +3190,10 @@ def render_daily_recommendation_ledger_page():
             <div class="ledger-rec-card">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
                     <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span style="font-size: 1.15rem; font-weight: 800; color: #F1F5F9;">#{rank} {sym}</span>
+                        <span style="font-size: 1.15rem; font-weight: 800; color: #F1F5F9;">#{rank} {_esc(sym)}</span>
                         {etf_badge_html}
                         <span style="background: {'rgba(16,185,129,0.15)' if 'CALL' in act else 'rgba(244,63,94,0.15)'}; color: {'#34D399' if 'CALL' in act else '#FB7185'}; border: 1px solid {'rgba(16,185,129,0.35)' if 'CALL' in act else 'rgba(244,63,94,0.35)'}; font-size: 0.72rem; font-weight: 800; padding: 2px 9px; border-radius: 9999px;">
-                            {act}
+                            {_esc(act)}
                         </span>
                         {conv_badge_html}
                         {dte_badge_html}
@@ -3087,7 +3210,7 @@ def render_daily_recommendation_ledger_page():
                     <div>{horizon_tag} Dir / MFE: <b style="color: {'#34D399' if r_t5 >= 0 else '#FB7185'};">{r_t5:+.2f}%</b> / <b style="color: #34D399;">{r_mfe:+.2f}%</b></div>
                     <div>Est Opt ROI ({horizon_tag}): <b style="color: {'#34D399' if r_opt_roi >= 0 else '#FB7185'};">{r_opt_roi:+.1f}%</b></div>
                     <div>5Y Exp Basis: <b style="color: #FF8533;">{exp_basis:+.2f}%</b></div>
-                    <div>Whale Tape: <b style="color: #F1F5F9;">{whale_b}</b></div>
+                    <div>Whale Tape: <b style="color: #F1F5F9;">{_esc(whale_b)}</b></div>
                     <div>ER / Strike: <b>{f'ER {days_er}d' if (days_er and days_er <= 25) else 'Clear'} &bull; ${rec_strike:.2f}</b></div>
                 </div>
             </div>

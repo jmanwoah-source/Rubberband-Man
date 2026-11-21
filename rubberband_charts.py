@@ -4,6 +4,7 @@ Rubberband Visual Depiction Engine v3.5 - Flagship Institutional Dark OLED Theme
 FMP Pro Altman Z / Piotroski Bifurcation, and 6-Pillar 24/48H Macro Radar).
 """
 
+import html as _html
 import math
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -191,12 +192,20 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
         if "close" not in full_df.columns:
             return go.Figure()
     else:
-        full_df = pd.DataFrame({"close": t_closes}).dropna()
+        full_df = pd.DataFrame({"close": t_closes})
 
+    full_df = full_df.dropna(subset=["close"]).copy()
     if full_df.empty or len(full_df) < 12:
         return go.Figure()
 
-    full_df = full_df.dropna(subset=["close"]).copy()
+    if not isinstance(full_df.index, pd.DatetimeIndex):
+        try:
+            full_df.index = pd.to_datetime(full_df.index, errors="coerce")
+            full_df = full_df[full_df.index.notna()]
+        except Exception:
+            full_df.index = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=len(full_df))
+        if len(full_df) < 12:
+            return go.Figure()
     if "volume" in full_df.columns and full_df["volume"].sum() > 0:
         pv = full_df["close"] * full_df["volume"]
         vwma20_s = pv.rolling(20, min_periods=5).sum() / full_df["volume"].rolling(20, min_periods=5).sum()
@@ -228,7 +237,7 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
     # Slice the clean 35-day window AFTER all rolling bands are fully warmed up
     df = full_df.tail(35).copy()
     # Ensure live point matches exact metrics
-    live_p = float(metrics.get("price", df["close"].iloc[-1]))
+    live_p = float(metrics.get("price") or df["close"].iloc[-1])
     df.iloc[-1, df.columns.get_loc("close")] = live_p
 
     fig = go.Figure()
@@ -309,11 +318,12 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
     ))
 
     # 6. 1-5 Day Forward Projection Cone
-    strike = float(metrics.get("recommended_strike", live_p))
-    target_p = float(metrics.get("target_price", df["equil"].iloc[-1]))
+    strike = float(metrics.get("recommended_strike") or live_p)
+    target_p = float(metrics.get("target_price") or df["equil"].iloc[-1])
     invalidation = metrics.get("invalidation_price")
-    action = str(metrics.get("action", "WAIT"))
-    ou_hl = float(metrics.get("ou_half_life", 4.0))
+    action = str(metrics.get("action") or "WAIT")
+    ou_hl = float(metrics.get("ou_half_life") or 4.0)
+    est_delta_disp = float(metrics.get("estimated_delta") if metrics.get("estimated_delta") is not None else 0.50)
     strike_color = "#10B981" if "CALL" in action else "#F43F5E" if "PUT" in action else "#FF6B00"
     cone_fill = "rgba(16, 185, 129, 0.14)" if "CALL" in action else "rgba(244, 63, 94, 0.14)" if "PUT" in action else "rgba(255, 107, 0, 0.12)"
 
@@ -367,7 +377,7 @@ def create_rubberband_envelope_visual(ticker: str, metrics: Dict[str, Any], t_cl
         line_dash="dash",
         line_color=strike_color,
         line_width=1.8,
-        annotation_text=f" 🎯 30–45D {action} Strike: ${strike:.2f} (Δ {metrics.get('estimated_delta', 0.50):+.2f}) ",
+        annotation_text=f" 🎯 30–45D {action} Strike: ${strike:.2f} (Δ {est_delta_disp:+.2f}) ",
         annotation_position="top left",
         annotation_font=dict(color=strike_color, size=10.5, family="Plus Jakarta Sans"),
         annotation_bgcolor="rgba(10, 12, 18, 0.90)",
@@ -1014,9 +1024,9 @@ def create_cross_asset_rotation_compass(
 
     # 4. Clean Vector Arrows for 3-Day Rotation (Only 1 sleek trajectory vector per node)
     for n in nodes:
-        x3, y3 = float(n["x_3d"]), float(n["y_3d"])
-        xn, yn = float(n["x_now"]), float(n["y_now"])
-        pal = quad_palette.get(n["quadrant"], quad_palette["INFLOW_LEADER"])
+        x3, y3 = float(n.get("x_3d", 0.0) or 0.0), float(n.get("y_3d", 0.0) or 0.0)
+        xn, yn = float(n.get("x_now", 0.0) or 0.0), float(n.get("y_now", 0.0) or 0.0)
+        pal = quad_palette.get(n.get("quadrant", "INFLOW_LEADER"), quad_palette["INFLOW_LEADER"])
         disp = math.hypot(xn - x3, yn - y3)
         if disp >= 0.14:
             fig.add_trace(go.Scatter(
@@ -1025,7 +1035,7 @@ def create_cross_asset_rotation_compass(
                 mode="lines",
                 line=dict(
                     color=pal["tail"],
-                    width=2.0 if n["tier"] == "POWER_SECTOR" else 1.3,
+                    width=2.0 if n.get("tier") == "POWER_SECTOR" else 1.3,
                     dash="dot"
                 ),
                 hoverinfo="skip",
@@ -1046,18 +1056,18 @@ def create_cross_asset_rotation_compass(
     label_boxes: List[Dict[str, Any]] = []
 
     for idx, n in enumerate(nodes):
-        sym = n["symbol"]
-        short_sym = n["short"]
-        tier = n["tier"]
-        pal = quad_palette.get(n["quadrant"], quad_palette["INFLOW_LEADER"])
+        sym = str(n.get("symbol", ""))
+        short_sym = str(n.get("short", sym))
+        tier = str(n.get("tier", "MACRO_PLUMBING"))
+        pal = quad_palette.get(n.get("quadrant", "INFLOW_LEADER"), quad_palette["INFLOW_LEADER"])
         is_active_bench = (sym == active_benchmark)
 
-        rvol = float(n["rvol"])
-        chg_1d = float(n["chg_1d"])
-        chg_5d = float(n["chg_5d"])
-        clv = float(n["clv"])
-        dvol = float(n["dollar_vol_b"])
-        xn, yn = float(n["x_now"]), float(n["y_now"])
+        rvol = float(n.get("rvol", 1.0) or 1.0)
+        chg_1d = float(n.get("chg_1d", 0.0) or 0.0)
+        chg_5d = float(n.get("chg_5d", 0.0) or 0.0)
+        clv = float(n.get("clv", 0.0) or 0.0)
+        dvol = float(n.get("dollar_vol_b", 0.1) or 0.1)
+        xn, yn = float(n.get("x_now", 0.0) or 0.0), float(n.get("y_now", 0.0) or 0.0)
 
         if tier == "POWER_SECTOR":
             base_sz = 22.0 if is_active_bench else float(np.clip(16.5 + rvol * 2.5, 17.0, 21.0))
@@ -1399,17 +1409,17 @@ def create_ticker_options_strike_dot_matrix(
     """
     import quant_kernel
 
-    spot = max(1.0, float(metrics.get("price", 100.0)))
-    vwma20 = float(metrics.get("vwma20", metrics.get("sma20", spot)))
-    target_p = float(metrics.get("target_price", vwma20))
-    rec_strike = float(metrics.get("recommended_strike", spot * 1.05))
-    call_rec = float(metrics.get("call_strike", rec_strike))
-    put_rec = float(metrics.get("put_strike", spot * 0.95))
-    action = str(metrics.get("action", "BUY CALL"))
-    atr14 = float(metrics.get("atr14", spot * 0.035))
-    vol_pct = max(16.0, float(metrics.get("realized_vol", 42.0)))
-    vol_rank = float(metrics.get("vol_rank", 50.0))
-    ou_hl = max(1.5, float(metrics.get("ou_half_life", 4.2)))
+    spot = max(1.0, float(metrics.get("price") or 100.0))
+    vwma20 = float(metrics.get("vwma20") or metrics.get("sma20") or spot)
+    target_p = float(metrics.get("target_price") or vwma20)
+    rec_strike = float(metrics.get("recommended_strike") or spot * 1.05)
+    call_rec = float(metrics.get("call_strike") or rec_strike)
+    put_rec = float(metrics.get("put_strike") or spot * 0.95)
+    action = str(metrics.get("action") or "BUY CALL")
+    atr14 = float(metrics.get("atr14") or spot * 0.035)
+    vol_pct = max(16.0, float(metrics.get("realized_vol") or 42.0))
+    vol_rank = float(metrics.get("vol_rank") if metrics.get("vol_rank") is not None else 50.0)
+    ou_hl = max(1.5, float(metrics.get("ou_half_life") or 4.2))
 
     sigma_base = vol_pct / 100.0
     dte_val = max(7, int(dte or 35))
@@ -1469,8 +1479,8 @@ def create_ticker_options_strike_dot_matrix(
         T_exit = max(1.0, float(c_dte_med - hold_d)) / 365.0
         dte_val = c_dte_med
 
-        p_rows = df_c[(df_c["side"].str.lower() == "put") & (df_c["strike_f"].between(spot * 0.85, spot * 1.005)) & (df_c["mid_f"] >= 0.08)].sort_values("strike_f")
-        c_rows = df_c[(df_c["side"].str.lower() == "call") & (df_c["strike_f"].between(spot * 0.995, spot * 1.15)) & (df_c["mid_f"] >= 0.08)].sort_values("strike_f")
+        p_rows = df_c[(df_c["side"].astype(str).str.lower() == "put") & (df_c["strike_f"].between(spot * 0.85, spot * 1.005)) & (df_c["mid_f"] >= 0.08)].sort_values("strike_f")
+        c_rows = df_c[(df_c["side"].astype(str).str.lower() == "call") & (df_c["strike_f"].between(spot * 0.995, spot * 1.15)) & (df_c["mid_f"] >= 0.08)].sort_values("strike_f")
 
         p_recs = []
         for _, row in p_rows.iterrows():
@@ -1904,15 +1914,15 @@ def create_iv_smile_and_term_structure_chart(
     # --- LEFT PANEL: VOLATILITY SMILE & SVI ---
     plotted_smile = False
     t_smile = 35.0 / 365.0
-    if chain_df is not None and not chain_df.empty and "strike" in chain_df.columns:
+    if chain_df is not None and not chain_df.empty and "strike" in chain_df.columns and "side" in chain_df.columns:
         df_s = chain_df.copy()
         df_s["strike_f"] = pd.to_numeric(df_s["strike"], errors="coerce")
         df_s["iv_f"] = pd.to_numeric(df_s.get("impliedVolatility", 0.0), errors="coerce")
         df_s["dte_f"] = pd.to_numeric(df_s.get("dte", 35), errors="coerce").fillna(35)
         t_smile = max(7.0, float(df_s["dte_f"].median())) / 365.0
         df_s = df_s[df_s["strike_f"].between(spot * 0.78, spot * 1.24) & df_s["iv_f"].between(0.04, 3.0)]
-        puts_s = df_s[(df_s["side"].str.lower() == "put") & (df_s["strike_f"] <= spot * 1.01)].sort_values("strike_f")
-        calls_s = df_s[(df_s["side"].str.lower() == "call") & (df_s["strike_f"] >= spot * 0.99)].sort_values("strike_f")
+        puts_s = df_s[(df_s["side"].astype(str).str.lower() == "put") & (df_s["strike_f"] <= spot * 1.01)].sort_values("strike_f")
+        calls_s = df_s[(df_s["side"].astype(str).str.lower() == "call") & (df_s["strike_f"] >= spot * 0.99)].sort_values("strike_f")
 
         if not puts_s.empty:
             plotted_smile = True
@@ -2031,6 +2041,7 @@ def create_iv_smile_and_term_structure_chart(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(12, 15, 22, 0.42)",
         font=dict(family="Plus Jakarta Sans, JetBrains Mono, sans-serif", color="#CBD5E1"),
+        autosize=True,
         height=295,
         margin=dict(l=48, r=24, t=42, b=36),
         legend=dict(
@@ -2043,7 +2054,10 @@ def create_iv_smile_and_term_structure_chart(
             font=dict(family="Plus Jakarta Sans, sans-serif", size=11.5, color="#E2E8F0"),
         ),
     )
-    fig.update_annotations(font=dict(size=11.5, color="#E2E8F0", family="Plus Jakarta Sans"))
+    for ann in (fig.layout.annotations or []):
+        txt_a = str(getattr(ann, "text", "") or "")
+        if "OPRA Volatility" in txt_a or "Multi-Expiry" in txt_a:
+            ann.font = dict(size=11.5, color="#E2E8F0", family="Plus Jakarta Sans")
     fig.update_xaxes(tickprefix="$", showgrid=True, gridcolor="rgba(255,255,255,0.05)", row=1, col=1)
     fig.update_xaxes(showgrid=False, row=1, col=2)
     fig.update_yaxes(ticksuffix="%", showgrid=True, gridcolor="rgba(255,255,255,0.05)", row=1, col=1)
@@ -2405,6 +2419,7 @@ def create_smart_money_convergence_gauge(smart_money_score: float, insider_ratio
     fig.update_layout(
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
+        autosize=True,
         height=180,
         margin=dict(l=15, r=15, t=35, b=15),
         font=dict(family="Plus Jakarta Sans, sans-serif", color="#CBD5E1")
@@ -2822,6 +2837,7 @@ def create_macro_economic_7pillar_spider(econ_data: Dict[str, Any]) -> go.Figure
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family="Plus Jakarta Sans, sans-serif", color="#CBD5E1"),
+        autosize=True,
         height=540,
         margin=dict(l=82, r=82, t=42, b=120),
         showlegend=True,
@@ -2972,6 +2988,7 @@ def create_empirical_excursion_profile_chart(ticker: str, metrics: Dict[str, Any
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(12, 15, 22, 0.42)",
         font=dict(family="Plus Jakarta Sans, sans-serif", color="#CBD5E1"),
+        autosize=True,
         height=235,
         margin=dict(l=135, r=24, t=26, b=32),
         xaxis=dict(
@@ -3023,6 +3040,8 @@ def create_schwab_payoff_curve_chart(
     sigma = float(iv) / 100.0 if float(iv) > 3.0 else max(0.15, float(iv))
     r = 0.0425
     is_call = (str(opt_type).upper() == "CALL")
+    tgt_px = float(target_price) if (target_price is not None and float(target_price) > 0) else round(s0 * (1.06 if is_call else 0.94), 2)
+    stp_px = float(stop_price) if (stop_price is not None and float(stop_price) > 0) else round(s0 * (0.95 if is_call else 1.05), 2)
     is_spread = (
         str(strategy).upper() in ("VERTICAL_DEBIT_SPREAD", "DEBIT_SPREAD", "SPREAD")
         and short_strike is not None
@@ -3033,7 +3052,7 @@ def create_schwab_payoff_curve_chart(
 
     total_debit = contracts * prem * 100.0 + contracts * (1.30 if is_spread else 0.65)
 
-    bounds_pts = [s0 * 0.82, s0 * 1.18, k * 0.85, k * 1.15, float(stop_price) * 0.95, float(target_price) * 1.05]
+    bounds_pts = [s0 * 0.82, s0 * 1.18, k * 0.85, k * 1.15, stp_px * 0.95, tgt_px * 1.05]
     if is_spread:
         bounds_pts.extend([k2 * 0.92, k2 * 1.08])
     low_bound = min(bounds_pts)
@@ -3132,20 +3151,20 @@ def create_schwab_payoff_curve_chart(
         annotation_font=dict(size=9.5, color="#E2E8F0", family="JetBrains Mono")
     )
     fig.add_vline(
-        x=float(target_price),
+        x=tgt_px,
         line_width=1.8,
         line_dash="dash",
         line_color="#10B981",
-        annotation_text=f"Target ${float(target_price):.2f}",
+        annotation_text=f"Target ${tgt_px:.2f}",
         annotation_position="top right",
         annotation_font=dict(size=9.5, color="#10B981", family="JetBrains Mono")
     )
     fig.add_vline(
-        x=float(stop_price),
+        x=stp_px,
         line_width=1.8,
         line_dash="dash",
         line_color="#F43F5E",
-        annotation_text=f"Stop ${float(stop_price):.2f}",
+        annotation_text=f"Stop ${stp_px:.2f}",
         annotation_position="top left",
         annotation_font=dict(size=9.5, color="#F43F5E", family="JetBrains Mono")
     )
@@ -3154,6 +3173,7 @@ def create_schwab_payoff_curve_chart(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(12, 15, 22, 0.42)",
         font=dict(family="Plus Jakarta Sans, sans-serif", color="#CBD5E1"),
+        autosize=True,
         height=270,
         margin=dict(l=55, r=24, t=28, b=42),
         xaxis=dict(
@@ -3207,14 +3227,14 @@ def create_float_topology_card_html(symbol: str, float_data: Dict[str, Any]) -> 
       3. 4-Column high-density micro-metric grid (Short Float, DTC, Borrowed Shares, Institutional Control)
       4. Asymmetric Collar Put Strategy Rationale Box
     """
-    sym = (symbol or "").strip().upper()
+    sym = _html.escape((symbol or "").strip().upper())
     if not float_data or not float_data.get("has_data", False):
         return (
             f'<div class="float-topology-card" style="opacity: 0.88;">'
             f'<div class="float-topology-hdr">'
             f'<div class="float-topology-title">'
             f'<i class="fa-solid fa-chart-pie" style="color: #FF6B00;"></i>'
-            f'<span>EQUITY FLOAT TOPOLOGY & LOAN PRESSURE</span>'
+            f'<span>EQUITY FLOAT TOPOLOGY &amp; LOAN PRESSURE</span>'
             f'<span style="color: #64748B; font-size: 0.70rem;">&bull; {sym}</span>'
             f'</div>'
             f'<span class="squeeze-hazard-pill squeeze-hazard-low">'
@@ -3237,11 +3257,11 @@ def create_float_topology_card_html(symbol: str, float_data: Dict[str, Any]) -> 
     free_float_pct = float(float_data.get("free_float_pct", 100.0) or 100.0)
     inst_lockup_pct = float(float_data.get("inst_lockup_pct", round(max(0.0, 100.0 - free_float_pct), 1)) or 0.0)
     pc_13f = float(float_data.get("inst_put_call_ratio", 1.0) or 1.0)
-    hedge_regime = str(float_data.get("inst_hedge_regime", "BALANCED 13F HEDGE"))
+    hedge_regime = _html.escape(str(float_data.get("inst_hedge_regime") or "BALANCED 13F HEDGE"))
     short_mom = float(float_data.get("short_mom_pct", 0.0) or 0.0)
-    hazard_level = str(float_data.get("hazard_level", "LOW")).upper()
-    hazard_badge = str(float_data.get("hazard_badge", "STABLE FLOAT DYNAMICS"))
-    collar_advice = str(float_data.get("collar_advice", "Standard 30-45 DTE options playbook applies."))
+    hazard_level = str(float_data.get("hazard_level") or "LOW").upper()
+    hazard_badge = _html.escape(str(float_data.get("hazard_badge") or "STABLE FLOAT DYNAMICS"))
+    collar_advice = _html.escape(str(float_data.get("collar_advice") or "Standard 30-45 DTE options playbook applies."))
 
     # Hazard pill class & icon
     if hazard_level == "EXTREME":

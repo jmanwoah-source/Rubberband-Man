@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import base64
 import html as _html
-import importlib
 import json
 import os
 import re
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +24,7 @@ from PIL import Image
 import daily_tracker_daemon
 import diary_db
 import diary_views
+import edu_annotations as edu
 import intel_bus_bridge as ibb
 import llm_router
 import marketdata_client
@@ -36,69 +37,31 @@ import styles
 import ui_kit
 import ui_navigation
 
-# Hot-reload safety guard for active Streamlit worker processes
-if not hasattr(qk, "fit_svi_volatility_smile") or "q" not in qk.american_crr_price_and_greeks.__code__.co_varnames:
-    importlib.reload(qk)
-if not hasattr(diary_db, "record_daily_iv_snapshot"):
-    importlib.reload(diary_db)
-if not hasattr(marketdata_client, "get_iv_term_structure_and_implied_move"):
-    importlib.reload(marketdata_client)
-if (
-    not hasattr(rbe3, "get_unified_5day_catalyst_outlook")
-    or not hasattr(rbe3, "get_macro_economic_7pillar_spider_data")
-    or not hasattr(rbe3, "calculate_options_volatility_and_spread_telemetry")
-    or not hasattr(rbe3, "get_cross_asset_rotation_compass_data")
-    or not hasattr(rbe3, "get_ai_5day_bias_shield_assessment")
-    or "active_cand" not in rbe3.get_ai_5day_bias_shield_assessment.__code__.co_varnames
-    or "chain_df" not in rbe3.calculate_options_volatility_and_spread_telemetry.__code__.co_varnames
-):
-    importlib.reload(rbe3)
-if (
-    not hasattr(rbc, "create_macro_economic_7pillar_spider")
-    or not hasattr(rbc, "create_cross_asset_rotation_compass")
-    or not hasattr(rbc, "create_iv_smile_and_term_structure_chart")
-    or "conviction_score_200" not in rbc.create_rubberband_gauge.__code__.co_varnames
-    or "chain_df" not in rbc.create_ticker_options_strike_dot_matrix.__code__.co_varnames
-    or "short_strike" not in rbc.create_schwab_payoff_curve_chart.__code__.co_varnames
-):
-    importlib.reload(rbc)
-if not hasattr(ui_kit, "format_conviction_200_badge") or not hasattr(ui_kit, "render_5day_ring_svg"):
-    importlib.reload(ui_kit)
-importlib.reload(styles)
-importlib.reload(ui_navigation)
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_APP_DIR, ".env"))
 
-load_dotenv()
 
 # =========================================================================
-# PROCESS-LEVEL BACKGROUND DAEMONS (RUNS ONCE PER PYTHON OS PROCESS)
+# PROCESS-LEVEL BACKGROUND DAEMONS (RUNS ONCE PER SERVER PROCESS)
 # =========================================================================
-_PROCESS_SINGLETON_LOCK = threading.Lock()
-_DAEMON_INITIALIZED = False
-_CATALYSTS_INITIALIZED = False
+@st.cache_resource(show_spinner=False)
+def _start_process_background_services_once() -> bool:
+    try:
+        daily_tracker_daemon.auto_snapshot_background_worker()
+    except Exception:
+        pass
+
+    def _digest_task() -> None:
+        try:
+            rbe3.digest_world_catalysts_with_llm()
+        except Exception:
+            pass
+
+    threading.Thread(target=_digest_task, daemon=True, name="CatalystsDigestDaemon").start()
+    return True
 
 
-def _init_process_background_services() -> None:
-    global _DAEMON_INITIALIZED, _CATALYSTS_INITIALIZED
-    with _PROCESS_SINGLETON_LOCK:
-        if not _DAEMON_INITIALIZED:
-            _DAEMON_INITIALIZED = True
-            try:
-                daily_tracker_daemon.auto_snapshot_background_worker()
-            except Exception:
-                pass
-        if not _CATALYSTS_INITIALIZED:
-            _CATALYSTS_INITIALIZED = True
-
-            def _digest_task() -> None:
-                try:
-                    rbe3.digest_world_catalysts_with_llm()
-                except Exception:
-                    pass
-
-            threading.Thread(target=_digest_task, daemon=True, name="CatalystsDigestDaemon").start()
-
-
-_init_process_background_services()
+_start_process_background_services_once()
 
 # =========================================================================
 # STREAMLIT MEMOIZATION LAYER
@@ -212,8 +175,9 @@ def cached_scan_intel_bus(moneyness_mode: str):
 # =========================================================================
 # PAGE CONFIG & OBSIDIAN FROSTED-GLASS DESIGN SYSTEM
 # =========================================================================
+_icon_path = os.path.join(_APP_DIR, "spline_pointer.png")
 try:
-    _page_icon_img = Image.open("spline_pointer.png") if os.path.exists("spline_pointer.png") else None
+    _page_icon_img = Image.open(_icon_path) if os.path.exists(_icon_path) else None
 except Exception:
     _page_icon_img = None
 
@@ -226,21 +190,27 @@ st.set_page_config(
 
 st.markdown(styles.get_custom_css(), unsafe_allow_html=True)
 
-# Tactile Sidebar Sliding Grabber (Obsidian + Hyper-Orange #FF6B00)
-ui_navigation.render_sidebar_grabber()
-
 
 # =========================================================================
 # CORE HELPERS & WATCHLIST PERSISTENCE
 # =========================================================================
-WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "watchlist.json")
+WATCHLIST_FILE = os.path.join(_APP_DIR, "watchlist.json")
 QUICK_THEMATIC_ETFS = ["REMX", "SRVR", "ROBO", "JEDI", "SMH", "URA", "QTUM", "IGV"]
 
 
+def _safe_http_url(url: Any) -> str:
+    s = str(url or "").strip()
+    if s.startswith("https://") or s.startswith("http://"):
+        return _html.escape(s, quote=True)
+    return ""
+
+
+@st.cache_data(show_spinner=False)
 def get_rubberband_logo_b64() -> str:
-    for fname in ("rubberband_logo_512.png", "rubberband_logo.png", "rubberband_logo_256.png"):
-        if os.path.exists(fname):
-            with open(fname, "rb") as f:
+    for fname in ("rubberband_logo_256.png", "rubberband_logo.png", "rubberband_logo_512.png"):
+        fpath = os.path.join(_APP_DIR, fname)
+        if os.path.exists(fpath):
+            with open(fpath, "rb") as f:
                 return base64.b64encode(f.read()).decode("utf-8")
     return ""
 
@@ -295,31 +265,75 @@ def _ring_5day_svg(pct: int, label: str, sub: str, is_active: bool = False, tone
     """)
 
 
-def save_env_keys(fmp_key=None, gemini_key=None, llm_backend=None, local_url=None, local_model=None, local_key=None) -> None:
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    settings: Dict[str, str] = {}
+def _mask_secret_status(env_var: str) -> str:
+    val = str(os.getenv(env_var, "") or "").strip()
+    if not val:
+        return "NOT CONFIGURED"
+    if len(val) <= 6:
+        return "CONFIGURED (***)"
+    return f"CONFIGURED (***{val[-4:]})"
+
+
+def save_env_keys(
+    fmp_key: Optional[str] = None,
+    gemini_key: Optional[str] = None,
+    marketdata_key: Optional[str] = None,
+    llm_backend: Optional[str] = None,
+    local_url: Optional[str] = None,
+    local_model: Optional[str] = None,
+    local_key: Optional[str] = None,
+) -> None:
+    env_path = os.path.join(_APP_DIR, ".env")
+    raw_lines: List[str] = []
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if "=" in s and not s.startswith("#"):
-                    k, v = s.split("=", 1)
-                    settings[k.strip()] = v.strip()
-    if fmp_key is not None:
-        settings["FMP_API_KEY"] = fmp_key
-    if gemini_key is not None:
-        settings["GEMINI_API_KEY"] = gemini_key
-    if llm_backend is not None:
-        settings["LLM_BACKEND"] = llm_backend
-    if local_url is not None:
-        settings["LOCAL_LLM_URL"] = local_url
-    if local_model is not None:
-        settings["LOCAL_LLM_MODEL"] = local_model
-    if local_key is not None:
-        settings["LOCAL_LLM_API_KEY"] = local_key
-    with open(env_path, "w", encoding="utf-8") as f:
-        for k, v in settings.items():
-            f.write(f"{k}={v}\n")
+            raw_lines = f.read().splitlines()
+
+    def _clean_v(s: Optional[str]) -> str:
+        return str(s or "").replace("\r", "").replace("\n", "").strip()
+
+    updates: Dict[str, str] = {}
+    if _clean_v(fmp_key):
+        updates["FMP_API_KEY"] = _clean_v(fmp_key)
+    if _clean_v(gemini_key):
+        updates["GEMINI_API_KEY"] = _clean_v(gemini_key)
+    if _clean_v(marketdata_key):
+        updates["MARKETDATA_API_KEY"] = _clean_v(marketdata_key)
+    if _clean_v(local_key):
+        updates["LOCAL_LLM_API_KEY"] = _clean_v(local_key)
+    if llm_backend is not None and _clean_v(llm_backend):
+        updates["LLM_BACKEND"] = _clean_v(llm_backend)
+    if local_url is not None and _clean_v(local_url):
+        updates["LOCAL_LLM_URL"] = _clean_v(local_url)
+    if local_model is not None and _clean_v(local_model):
+        updates["LOCAL_LLM_MODEL"] = _clean_v(local_model)
+
+    if not updates:
+        return
+
+    for k, v in updates.items():
+        os.environ[k] = v
+
+    seen: set = set()
+    out_lines: List[str] = []
+    for line in raw_lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k in updates:
+                out_lines.append(f"{k}={updates[k]}")
+                seen.add(k)
+                continue
+        out_lines.append(line)
+
+    for k, v in updates.items():
+        if k not in seen:
+            out_lines.append(f"{k}={v}")
+
+    tmp_env = f"{env_path}.tmp.{os.getpid()}.{uuid.uuid4().hex[:6]}"
+    with open(tmp_env, "w", encoding="utf-8") as f:
+        f.write("\n".join(out_lines) + "\n")
+    os.replace(tmp_env, env_path)
 
 
 def load_personal_watchlist() -> List[str]:
@@ -340,7 +354,7 @@ def load_personal_watchlist() -> List[str]:
 def save_personal_watchlist(watchlist: List[str]) -> None:
     try:
         clean_list = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))
-        temp_file = WATCHLIST_FILE + ".tmp"
+        temp_file = f"{WATCHLIST_FILE}.tmp.{os.getpid()}.{uuid.uuid4().hex[:6]}"
         with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(clean_list, f, indent=2)
         os.replace(temp_file, WATCHLIST_FILE)
@@ -425,11 +439,33 @@ def _select_ticker_and_sector(sym: str) -> None:
 # =========================================================================
 # DETERMINISTIC SESSION STATE INITIALIZATION (NO RANDOMIZATION)
 # =========================================================================
+ui_navigation.sync_workspace_from_query_params()
+
+_qp_ticker = str(st.query_params.get("ticker", "") or "").strip().upper()
+_qp_sector = str(st.query_params.get("sector", "") or "").strip()
+_qp_learn = str(st.query_params.get("learn", "") or "").strip().lower()
+
 if "session_bootstrap_done" not in st.session_state:
     st.session_state["session_bootstrap_done"] = True
-    st.session_state.selected_sector = "Semiconductors"
-    st.session_state.benchmark_override = rbe3.SECTORS["Semiconductors"]["benchmark"]
-    st.session_state.selected_ticker = "NVDA"
+    _init_sec = rbe3.normalize_sector_name(_qp_sector) if _qp_sector else "Semiconductors"
+    if _init_sec not in rbe3.SECTORS:
+        _init_sec = "Semiconductors"
+    st.session_state.selected_sector = _init_sec
+    st.session_state.benchmark_override = rbe3.SECTORS[_init_sec]["benchmark"]
+    st.session_state.selected_ticker = _qp_ticker or "NVDA"
+    if _qp_ticker:
+        _select_ticker_and_sector(_qp_ticker)
+    st.session_state["_seen_qp_ticker"] = st.session_state.selected_ticker
+    st.session_state["_seen_qp_sector"] = st.session_state.selected_sector
+elif _qp_ticker and _qp_ticker != st.session_state.get("_seen_qp_ticker"):
+    _select_ticker_and_sector(_qp_ticker)
+    st.session_state["_seen_qp_ticker"] = _qp_ticker
+elif _qp_sector and _qp_sector != st.session_state.get("_seen_qp_sector"):
+    _norm_sec = rbe3.normalize_sector_name(_qp_sector)
+    if _norm_sec in rbe3.SECTORS:
+        st.session_state.selected_sector = _norm_sec
+        st.session_state.benchmark_override = rbe3.SECTORS[_norm_sec]["benchmark"]
+    st.session_state["_seen_qp_sector"] = _qp_sector
 
 st.session_state.selected_sector = rbe3.normalize_sector_name(st.session_state.get("selected_sector", "Semiconductors"))
 if st.session_state.selected_sector not in rbe3.SECTORS:
@@ -442,6 +478,8 @@ if not st.session_state.get("benchmark_override"):
     st.session_state.benchmark_override = rbe3.SECTORS[st.session_state.selected_sector]["benchmark"]
 st.session_state.benchmark_override = rbe3.normalize_benchmark(st.session_state.benchmark_override)
 
+if "learn_mode" not in st.session_state:
+    st.session_state["learn_mode"] = _qp_learn not in ("0", "false", "off", "no")
 if "dte_posture" not in st.session_state:
     st.session_state.dte_posture = "Auto 30/45D"
 if "delta_profile" not in st.session_state:
@@ -477,39 +515,67 @@ st.session_state.moneyness_mode = "deep_convexity_otm" if _is_convex_otm else "m
 _delta_mode = "CONVEX_OTM" if _is_convex_otm else "HIGH_DELTA"
 _target_delta = 0.34 if _is_convex_otm else 0.50
 
-# Pre-compute Core Cockpit Feeds
-macro_pulse = cached_get_sector_macro_pulse()
-catalyst_outlook = cached_get_unified_5day_catalyst_outlook(
-    st.session_state.selected_sector,
-    st.session_state.selected_ticker,
-)
-symbolism = catalyst_outlook.get("symbolism", {})
-ranked_sector_candidates = cached_get_ranked_sector_candidates(
-    st.session_state.selected_sector,
-    st.session_state.benchmark_override,
-    st.session_state.moneyness_mode,
-    5,
-    st.session_state.selected_ticker,
-)
-ranked_by_conv = sorted(
-    ranked_sector_candidates or [],
-    key=lambda c: (
-        -1 if c.get("metrics", {}).get("is_bad_data", False) else 1,
-        int(c.get("conviction_abs_200", abs(int(c.get("conviction_score_200", 0))))),
-        float(c.get("blueprint", {}).get("composite_score", 0.0)),
-    ),
-    reverse=True,
-)
+# Pre-compute Core Cockpit Feeds ONLY when rendering Terminal Cockpit (skip heavy scans on Schwab / Journal)
+_early_app_view = st.session_state.get("pending_workspace_view") or st.session_state.get("active_app_view", ui_navigation.VIEW_TERMINAL)
+if _early_app_view == ui_navigation.VIEW_TERMINAL:
+    macro_pulse = cached_get_sector_macro_pulse()
+    catalyst_outlook = cached_get_unified_5day_catalyst_outlook(
+        st.session_state.selected_sector,
+        st.session_state.selected_ticker,
+    )
+    symbolism = catalyst_outlook.get("symbolism", {})
+    ranked_sector_candidates = cached_get_ranked_sector_candidates(
+        st.session_state.selected_sector,
+        st.session_state.benchmark_override,
+        st.session_state.moneyness_mode,
+        5,
+        st.session_state.selected_ticker,
+    )
+    ranked_by_conv = sorted(
+        ranked_sector_candidates or [],
+        key=lambda c: (
+            -1 if c.get("metrics", {}).get("is_bad_data", False) else 1,
+            int(c.get("conviction_abs_200", abs(int(c.get("conviction_score_200", 0))))),
+            float(c.get("blueprint", {}).get("composite_score", 0.0)),
+        ),
+        reverse=True,
+    )
+else:
+    macro_pulse = {}
+    catalyst_outlook = {}
+    symbolism = {}
+    ranked_sector_candidates = []
+    ranked_by_conv = []
+
+# Keep URL query params synchronized cleanly with active ticker/sector/learn state
+if str(st.query_params.get("ticker", "") or "").upper() != st.session_state.selected_ticker:
+    st.query_params["ticker"] = st.session_state.selected_ticker
+    st.session_state["_seen_qp_ticker"] = st.session_state.selected_ticker
+if str(st.query_params.get("sector", "") or "") != st.session_state.selected_sector:
+    st.query_params["sector"] = st.session_state.selected_sector
+    st.session_state["_seen_qp_sector"] = st.session_state.selected_sector
+if not bool(st.session_state.get("learn_mode", True)):
+    if st.query_params.get("learn") != "0":
+        st.query_params["learn"] = "0"
+elif "learn" in st.query_params:
+    del st.query_params["learn"]
 
 
 # =========================================================================
 # SIDEBAR OVERHAUL: BRAND, NAV, 5 DESKS, ETF CHIPS, DTE/DELTA, TOP HITS, WATCHLIST
 # =========================================================================
 with st.sidebar:
-    reg_badge_sb = symbolism.get("regime_label") or macro_pulse.get("market_regime_badge", "MACRO EQUILIBRIUM")
+    reg_badge_sb = symbolism.get("regime_label") or macro_pulse.get("market_regime_badge") or (
+        "MACRO EQUILIBRIUM" if _early_app_view == ui_navigation.VIEW_TERMINAL else "WORKSPACE STANDBY"
+    )
     exp_cap_sb = int(symbolism.get("exposure_cap_pct", 100) or 100)
     spy_chg_sb = float(macro_pulse.get("spy_change", 0.0) or 0.0)
     cap_col_sb = "#10B981" if exp_cap_sb >= 80 else ("#F43F5E" if exp_cap_sb <= 55 else "#FF8533")
+    sb_reg_sub = (
+        f"VIX {float(symbolism.get('vix_ratio', 0.94)):.2f}x &bull; 10Y {float(symbolism.get('tnx_yield', 4.25)):.2f}% &bull; Credit {float(symbolism.get('credit_z', 0.0)):+.2f}&sigma;"
+        if _early_app_view == ui_navigation.VIEW_TERMINAL
+        else "Terminal sector scans paused while in desk view"
+    )
 
     st.markdown(
         clean_html(f"""
@@ -525,11 +591,11 @@ with st.sidebar:
         </div>
         <div style="background:rgba(13,16,23,0.72);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:7px 10px;margin-bottom:10px;font-size:0.72rem;">
           <div style="font-weight:800;color:#E2E8F0;display:flex;justify-content:space-between;align-items:center;">
-            <span>{reg_badge_sb}</span>
+            <span>{_html.escape(str(reg_badge_sb))}</span>
             <span style="font-family:'JetBrains Mono',monospace;color:{'#10B981' if spy_chg_sb >= 0 else '#F43F5E'};">SPY {spy_chg_sb:+.2f}%</span>
           </div>
           <div style="color:#94A3B8;font-size:0.66rem;margin-top:2px;font-family:'JetBrains Mono',monospace;">
-            VIX {float(symbolism.get('vix_ratio', 0.94)):.2f}x &bull; 10Y {float(symbolism.get('tnx_yield', 4.25)):.2f}% &bull; Credit {float(symbolism.get('credit_z', 0.0)):+.2f}&sigma;
+            {sb_reg_sub}
           </div>
         </div>
         """),
@@ -557,7 +623,14 @@ with st.sidebar:
         st.session_state["radio_app_workspace_view"] = st.session_state.get("active_app_view", view_options[0])
 
     def _on_ws_change() -> None:
-        st.session_state.active_app_view = st.session_state.radio_app_workspace_view
+        picked_ws = st.session_state.radio_app_workspace_view
+        st.session_state.active_app_view = picked_ws
+        slug = ui_navigation.VIEW_SLUGS.get(picked_ws, "terminal")
+        if slug == "terminal":
+            if "page" in st.query_params:
+                del st.query_params["page"]
+        else:
+            st.query_params["page"] = slug
 
     selected_nav_view = st.radio(
         "Workspace",
@@ -569,6 +642,24 @@ with st.sidebar:
     )
     st.session_state.active_app_view = selected_nav_view
     ui_navigation.render_sidebar_density_control()
+
+    # Global Educational Learn Mode Toggle (Beginner -> Intermediate -> Desk Pro)
+    st.session_state["sb_learn_mode"] = bool(st.session_state.get("learn_mode", True))
+
+    def _on_learn_mode_toggle() -> None:
+        val = bool(st.session_state.get("sb_learn_mode", True))
+        st.session_state["learn_mode"] = val
+        if not val:
+            st.query_params["learn"] = "0"
+        elif "learn" in st.query_params:
+            del st.query_params["learn"]
+
+    st.toggle(
+        "🎓 Learn Mode (Show Guides)",
+        key="sb_learn_mode",
+        on_change=_on_learn_mode_toggle,
+        help="Show collapsible Beginner → Intermediate → Desk Pro guides for Options, Macro & Microstructure.",
+    )
 
     # Sector Selector across all 5 expanded desks
     st.markdown("<div class='rm-sb-section-label'>5-Desk Institutional Universe</div>", unsafe_allow_html=True)
@@ -613,10 +704,10 @@ with st.sidebar:
     # DTE Posture & Delta Profile
     st.markdown("<div class='rm-sb-section-label'>DTE Posture & Delta Profile</div>", unsafe_allow_html=True)
     dte_opts = ["Auto 30/45D", "30 DTE", "45 DTE"]
+    st.session_state.setdefault("sb_seg_dte_posture", st.session_state.get("dte_posture", "Auto 30/45D"))
     dte_choice = st.segmented_control(
         "DTE Posture",
         options=dte_opts,
-        default=st.session_state.get("dte_posture", "Auto 30/45D"),
         key="sb_seg_dte_posture",
         label_visibility="collapsed",
     )
@@ -625,11 +716,10 @@ with st.sidebar:
         st.rerun()
 
     delta_opts = ["High-Delta 0.40-0.65D", "Convex OTM 0.28-0.42D"]
-    delta_idx = 0 if st.session_state.get("delta_profile", delta_opts[0]) == delta_opts[0] else 1
+    st.session_state.setdefault("sb_radio_delta_profile", st.session_state.get("delta_profile", delta_opts[0]))
     delta_choice = st.radio(
         "Delta Profile",
         options=delta_opts,
-        index=delta_idx,
         key="sb_radio_delta_profile",
         label_visibility="collapsed",
     )
@@ -639,7 +729,7 @@ with st.sidebar:
         st.rerun()
 
     # Ranked Sector Top Hits (Signed -200..+200 Conviction)
-    st.markdown(f"<div class='rm-sb-section-label'>Top Hits · {st.session_state.selected_sector}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='rm-sb-section-label'>Top Hits · {_html.escape(st.session_state.selected_sector)}</div>", unsafe_allow_html=True)
     if ranked_by_conv:
         for idx_hit, c_hit in enumerate(ranked_by_conv[:8], start=1):
             h_sym = c_hit["symbol"]
@@ -711,33 +801,84 @@ with st.sidebar:
                     save_personal_watchlist(st.session_state.personal_watchlist)
                     st.rerun()
 
-    # Compact System, AI & Bus Config Modal
+    # Compact System, AI & Bus Config Modal (masked secret status — never pre-populates raw keys in HTML)
     @st.dialog("⚙️ System, AI & GX10 Bus Config", width="large")
     def _render_settings_dialog() -> None:
         tab_ai, tab_bus = st.tabs(["🧠 AI Compute & Keys", "📡 GX10 Discovery Bus"])
         with tab_ai:
+            st.caption(
+                f"Stored credentials — Gemini: `{_mask_secret_status('GEMINI_API_KEY')}` · "
+                f"FMP: `{_mask_secret_status('FMP_API_KEY')}` · "
+                f"MarketData: `{_mask_secret_status('MARKETDATA_API_KEY')}` · "
+                f"Local LLM Key: `{_mask_secret_status('LOCAL_LLM_API_KEY')}`"
+            )
+            st.session_state.setdefault(
+                "dlg_radio_llm_backend",
+                "Cloud: Google Gemini" if st.session_state.get("llm_backend", "gemini") == "gemini" else "Local: ASUS GX10 (Qwen 3.8)",
+            )
             b_choice = st.radio(
                 "Compute Engine",
                 options=["Cloud: Google Gemini", "Local: ASUS GX10 (Qwen 3.8)"],
-                index=0 if st.session_state.get("llm_backend", "gemini") == "gemini" else 1,
                 key="dlg_radio_llm_backend",
             )
             sel_b = "gemini" if "Gemini" in b_choice else "local"
+            l_url = st.session_state.get("input_local_url", local_cfg["url"])
+            l_mod = st.session_state.get("input_local_model", local_cfg["model"])
+            g_in, l_key = "", ""
             if sel_b == "local":
-                l_url = st.text_input("Endpoint URL", value=st.session_state.get("input_local_url", local_cfg["url"])).strip()
-                l_mod = st.text_input("Model Identifier", value=st.session_state.get("input_local_model", local_cfg["model"])).strip()
-                l_key = st.text_input("Local API Key", value=local_cfg["api_key"], type="password").strip()
-                g_in = os.getenv("GEMINI_API_KEY", "")
+                l_url = st.text_input(
+                    "Endpoint URL",
+                    value=l_url,
+                    key="dlg_local_url_in",
+                ).strip()
+                l_mod = st.text_input(
+                    "Model Identifier",
+                    value=l_mod,
+                    key="dlg_local_model_in",
+                ).strip()
+                l_key = st.text_input(
+                    "Update Local API Key (optional)",
+                    value="",
+                    placeholder="Leave blank to keep stored key",
+                    type="password",
+                    key="dlg_local_key_in",
+                ).strip()
             else:
-                g_in = st.text_input("Gemini API Key", value=os.getenv("GEMINI_API_KEY", ""), type="password")
-                l_url, l_mod, l_key = local_cfg["url"], local_cfg["model"], local_cfg["api_key"]
-            fmp_in = st.text_input("FMP Pro API Key", value=os.getenv("FMP_API_KEY", ""), type="password")
+                g_in = st.text_input(
+                    "Update Gemini API Key (optional)",
+                    value="",
+                    placeholder="Leave blank to keep stored key",
+                    type="password",
+                    key="dlg_gemini_key_in",
+                ).strip()
+            fmp_in = st.text_input(
+                "Update FMP Pro API Key (optional)",
+                value="",
+                placeholder="Leave blank to keep stored key",
+                type="password",
+                key="dlg_fmp_key_in",
+            ).strip()
+            md_in = st.text_input(
+                "Update MarketData.app API Key (optional)",
+                value="",
+                placeholder="Leave blank to keep stored key",
+                type="password",
+                key="dlg_marketdata_key_in",
+            ).strip()
             if st.button("Save Configuration", type="primary", width="stretch", key="dlg_save_keys"):
                 st.session_state["llm_backend"] = sel_b
                 st.session_state["input_local_url"] = l_url
                 st.session_state["input_local_model"] = l_mod
                 os.environ["LLM_BACKEND"] = sel_b
-                save_env_keys(fmp_key=fmp_in, gemini_key=g_in, llm_backend=sel_b, local_url=l_url, local_model=l_mod, local_key=l_key)
+                save_env_keys(
+                    fmp_key=fmp_in or None,
+                    gemini_key=g_in or None,
+                    marketdata_key=md_in or None,
+                    llm_backend=sel_b,
+                    local_url=l_url,
+                    local_model=l_mod,
+                    local_key=l_key or None,
+                )
                 st.rerun()
         with tab_bus:
             try:
@@ -746,7 +887,7 @@ with st.sidebar:
             except Exception:
                 bus_sigs, bus_dir = [], "Offline"
             st.caption(f"GX10 WAL Bridge: `{bus_dir}` ({len(bus_sigs)} signals)")
-            feed_in = st.text_area("Custom Ticker Filter (CSV)", value=st.session_state.upstream_tickers_input, height=70)
+            feed_in = st.text_area("Custom Ticker Filter (CSV)", value=st.session_state.upstream_tickers_input, height=70, key="dlg_bus_csv")
             bc1, bc2, bc3 = st.columns(3)
             with bc1:
                 if st.button("Apply CSV", width="stretch", key="dlg_bus_apply"):
@@ -776,6 +917,31 @@ if current_view == ui_navigation.VIEW_SCHWAB:
 elif current_view == ui_navigation.VIEW_JOURNAL:
     diary_views.render_daily_recommendation_ledger_page()
     st.stop()
+
+# Ensure Terminal feeds are hydrated if sidebar switched back to Terminal mid-rerun
+if not ranked_by_conv and not macro_pulse:
+    macro_pulse = cached_get_sector_macro_pulse()
+    catalyst_outlook = cached_get_unified_5day_catalyst_outlook(
+        st.session_state.selected_sector,
+        st.session_state.selected_ticker,
+    )
+    symbolism = catalyst_outlook.get("symbolism", {})
+    ranked_sector_candidates = cached_get_ranked_sector_candidates(
+        st.session_state.selected_sector,
+        st.session_state.benchmark_override,
+        st.session_state.moneyness_mode,
+        5,
+        st.session_state.selected_ticker,
+    )
+    ranked_by_conv = sorted(
+        ranked_sector_candidates or [],
+        key=lambda c: (
+            -1 if c.get("metrics", {}).get("is_bad_data", False) else 1,
+            int(c.get("conviction_abs_200", abs(int(c.get("conviction_score_200", 0))))),
+            float(c.get("blueprint", {}).get("composite_score", 0.0)),
+        ),
+        reverse=True,
+    )
 
 active_ticker = st.session_state.selected_ticker
 benchmark_symbol = st.session_state.benchmark_override
@@ -864,20 +1030,30 @@ st.markdown(
     <div class="rm-symbolism-bar">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span style="font-family:'JetBrains Mono',monospace;font-size:0.74rem;font-weight:800;color:#FF8533;background:rgba(255,107,0,0.14);border:1px solid rgba(255,107,0,0.42);padding:4px 11px;border-radius:9999px;letter-spacing:0.04em;">
-          {reg_label}
+          {_html.escape(reg_label)}
         </span>
-        <span class="hud-pill">VIX Term: <b style="color:{vix_col};font-family:'JetBrains Mono',monospace;">{vix_ratio:.3f}x</b> <span style="color:#94A3B8;">({vix_state})</span></span>
+        <span class="hud-pill">VIX Term: <b style="color:{vix_col};font-family:'JetBrains Mono',monospace;">{vix_ratio:.3f}x</b> <span style="color:#94A3B8;">({_html.escape(vix_state)})</span></span>
         <span class="hud-pill">Credit Z (HYG/LQD): <b style="color:{cred_col};font-family:'JetBrains Mono',monospace;">{credit_z:+.2f}&sigma;</b></span>
         <span class="hud-pill">10Y (^TNX): <b style="color:{tnx_col};font-family:'JetBrains Mono',monospace;">{tnx_yield:.2f}%</b> <span style="color:#94A3B8;">({tnx_5d_bps:+.0f}bps)</span></span>
         <span class="hud-pill">Tape: <b style="color:{spy_col};">SPY {spy_ret:+.2f}%</b> / <b style="color:{qqq_col};">QQQ {qqq_ret:+.2f}%</b> &bull; RVOL <b style="color:#E2E8F0;">{spy_rvol:.2f}x</b> &bull; Breadth 5D <b style="color:{brd_col};">{breadth_5d:+.2f}%</b></span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <span class="hud-pill" style="border-color:{cap_col}55;">Exposure Cap: <b style="color:{cap_col};font-family:'JetBrains Mono',monospace;">{exp_cap_pct}%</b></span>
-        <span class="rm-dte-pill">{effective_dte} DTE &middot; {dte_mode_tag}</span>
+        <span class="rm-dte-pill">{effective_dte} DTE &middot; {_html.escape(dte_mode_tag)}</span>
       </div>
     </div>
     """),
     unsafe_allow_html=True,
+)
+edu.render_edu_drawer(
+    "macro_regime",
+    live_ctx={
+        "vix_ratio": vix_ratio,
+        "credit_z": credit_z,
+        "tnx_yield": tnx_yield,
+        "exposure_cap_pct": exp_cap_pct,
+        "regime_label": reg_label,
+    },
 )
 
 
@@ -937,14 +1113,14 @@ st.markdown(
             <i class="fa-solid fa-calendar-days" style="color:#FF6B00;margin-right:6px;"></i>5-Trading-Day Catalyst &amp; Macro Outlook
           </span>
           <span style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;font-weight:800;color:{bias_col};background:rgba(255,255,255,0.04);border:1px solid {bias_col}55;padding:3px 10px;border-radius:9999px;">
-            BIAS: {bias_label} ({bias_score:+d})
+            BIAS: {_html.escape(bias_label)} ({bias_score:+d})
           </span>
           <span style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;font-weight:800;color:{risk_col};background:rgba(255,255,255,0.04);border:1px solid {risk_col}55;padding:3px 10px;border-radius:9999px;">
-            BINARY SHIELD: {bin_risk} ({bin_cnt} 5D Events)
+            BINARY SHIELD: {_html.escape(bin_risk)} ({bin_cnt} 5D Events)
           </span>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <span class="rm-dte-pill">{dte_presc_lbl}</span>
+          <span class="rm-dte-pill">{_html.escape(dte_presc_lbl)}</span>
         </div>
       </div>
       <div style="font-size:0.78rem;color:#CBD5E1;line-height:1.45;border-left:2px solid #FF6B00;padding-left:10px;">
@@ -1017,6 +1193,16 @@ if days_list:
     rings_html += "</div>"
     st.markdown(clean_html(rings_html), unsafe_allow_html=True)
 
+edu.render_edu_drawer(
+    "catalysts_5d",
+    live_ctx={
+        "binary_event_count_5d": bin_cnt,
+        "recommended_dte": int(catalyst_outlook.get("recommended_dte", effective_dte) or effective_dte),
+        "binary_risk_level": bin_risk,
+        "ai_bias_score": ai_m_score,
+    },
+)
+
 # 3-Column Frosted Synthesis Grid: SEC 8-K | Fed & Macro Calendar | Sector FMP News Wire (Collapsible)
 filings_raw = catalyst_outlook.get("sec_8k_filings", []) or []
 wl_set = set(st.session_state.get("personal_watchlist", []))
@@ -1051,7 +1237,7 @@ with st.expander("📡 Live Institutional Wire: SEC 8-K Filings • Fed & Treasu
             fsym = _html.escape(str(f.get("symbol", "SEC")))
             fform = _html.escape(str(f.get("form_type", "8-K")))
             fdate = _html.escape(str(f.get("accepted_date") or f.get("filing_date", "")))
-            flink = str(f.get("link") or "#")
+            flink_safe = _safe_http_url(f.get("link")) or "#"
             is_hit = f.get("is_active_match") or fsym == active_ticker
             badge_c = "#FF8533" if is_hit else "#CBD5E1"
             rows_8k_html += (
@@ -1060,7 +1246,7 @@ with st.expander("📡 Live Institutional Wire: SEC 8-K Filings • Fed & Treasu
                 f'<span style="font-family:JetBrains Mono,monospace;font-weight:800;color:{badge_c};">{fsym} &middot; {fform}</span>'
                 f'<span style="font-family:JetBrains Mono,monospace;font-size:0.68rem;color:#94A3B8;">{fdate}</span>'
                 f'</div>'
-                f'<div style="margin-top:2px;"><a href="{_html.escape(flink)}" target="_blank" style="color:#E2E8F0;text-decoration:none;font-size:0.73rem;">Open SEC EDGAR Filing &nearr;</a></div>'
+                f'<div style="margin-top:2px;"><a href="{flink_safe}" target="_blank" rel="noopener noreferrer" style="color:#E2E8F0;text-decoration:none;font-size:0.73rem;">Open SEC EDGAR Filing &nearr;</a></div>'
                 f'</div>'
             )
         if not rows_8k_html:
@@ -1136,14 +1322,14 @@ with st.expander("📡 Live Institutional Wire: SEC 8-K Filings • Fed & Treasu
             ntitle = _html.escape(str(n.get("title", "")))
             nsite = _html.escape(str(n.get("site", "MarketWire")))
             ndate = _html.escape(str(n.get("published_date", ""))[:16])
-            nurl = _html.escape(str(n.get("url", "#")))
+            nurl_safe = _safe_http_url(n.get("url")) or "#"
             rows_news_html += (
                 f'<div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:0.75rem;">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">'
                 f'<span style="font-family:JetBrains Mono,monospace;font-size:0.66rem;font-weight:800;color:#FF8533;">{nsym} &middot; {nsite}</span>'
                 f'<span style="font-family:JetBrains Mono,monospace;font-size:0.66rem;color:#94A3B8;">{ndate}</span>'
                 f'</div>'
-                f'<div style="margin-top:2px;line-height:1.32;"><a href="{nurl}" target="_blank" style="color:#E2E8F0;text-decoration:none;font-weight:600;">{ntitle}</a></div>'
+                f'<div style="margin-top:2px;line-height:1.32;"><a href="{nurl_safe}" target="_blank" rel="noopener noreferrer" style="color:#E2E8F0;text-decoration:none;font-weight:600;">{ntitle}</a></div>'
                 f'</div>'
             )
         if not rows_news_html:
@@ -1226,7 +1412,7 @@ if ranked_by_conv:
             f'<span style="font-family:JetBrains Mono,monospace;font-size:0.64rem;font-weight:700;color:{c_vrp_col};background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);padding:2px 7px;border-radius:9999px;">VRP {c_vrp:+.1f}v</span>'
             f'<span style="font-family:JetBrains Mono,monospace;font-size:0.64rem;font-weight:700;color:#E2E8F0;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);padding:2px 7px;border-radius:9999px;">Hit {c_win:.0f}% (n={c_neff})</span>'
             f'<span style="font-family:JetBrains Mono,monospace;font-size:0.64rem;font-weight:800;color:{c_struct_col};background:rgba(255,255,255,0.04);border:1px solid {c_struct_col}55;padding:2px 7px;border-radius:9999px;">{c_struct_lbl}</span>'
-            f'<span style="font-family:JetBrains Mono,monospace;font-size:0.64rem;font-weight:700;color:{c_er_col};background:rgba(255,255,255,0.04);border:1px solid {c_er_col}44;padding:2px 7px;border-radius:9999px;">{c_er_lbl}</span>'
+            f'<span style="font-family:JetBrains Mono,monospace;font-size:0.64rem;font-weight:700;color:{c_er_col};background:rgba(255,255,255,0.04);border:1px solid {c_er_col}44;padding:2px 7px;border-radius:9999px;">{_html.escape(c_er_lbl)}</span>'
         )
 
         sc_row_col, sc_btn_col = st.columns([5.8, 1.0], gap="small", vertical_alignment="center")
@@ -1236,9 +1422,9 @@ if ranked_by_conv:
                 <div class="rm-scanner-row{' is-active' if is_sel_row else ''}">
                   <div style="display:flex;align-items:center;gap:10px;min-width:170px;">
                     <span style="font-family:'JetBrains Mono',monospace;font-size:0.74rem;font-weight:800;color:#FF8533;">#{r_idx}</span>
-                    <span style="font-family:'JetBrains Mono',monospace;font-size:0.94rem;font-weight:800;color:#F8FAFC;">{c_sym}</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:0.94rem;font-weight:800;color:#F8FAFC;">{_html.escape(c_sym)}</span>
                     {etf_tag}
-                    <span style="font-size:0.68rem;color:#94A3B8;font-weight:700;">{c_tier}</span>
+                    <span style="font-size:0.68rem;color:#94A3B8;font-weight:700;">{_html.escape(c_tier)}</span>
                   </div>
                   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                     {_conviction_200_badge(c_score, c_dir)}
@@ -1371,9 +1557,9 @@ st.markdown(
     <div class="ticker-telemetry-bar">
       <div class="telem-group">
         <div class="ticker-identity-item">
-          <img src="{_html.escape(company_logo)}" class="ticker-logo-avatar" alt="{active_ticker}" onerror="this.style.display='none'"/>
+          <img src="{_safe_http_url(company_logo)}" class="ticker-logo-avatar" alt="{_html.escape(active_ticker)}" onerror="this.style.display='none'"/>
           <div class="telem-item">
-            <span class="telem-val-hero">{active_ticker}</span>
+            <span class="telem-val-hero">{_html.escape(active_ticker)}</span>
             <span class="telem-sub" style="color:#FF8533;max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_html.escape(company_name)}</span>
           </div>
         </div>
@@ -1381,7 +1567,7 @@ st.markdown(
         <div class="telem-item">
           <span class="telem-label">SPOT &amp; EARNINGS</span>
           <span class="telem-val-hero">${curr_price:.2f} <span style="font-size:0.9rem;color:{'#10B981' if chg_1d >= 0 else '#F43F5E'};">({chg_1d:+.2f}%)</span></span>
-          <span class="telem-sub" style="color:{er_col};font-weight:700;">{er_txt}</span>
+          <span class="telem-sub" style="color:{er_col};font-weight:700;">{_html.escape(er_txt)}</span>
         </div>
         <div class="telem-sep"></div>
         <div class="telem-item">
@@ -1399,7 +1585,7 @@ st.markdown(
         <div class="telem-item">
           <span class="telem-label">O-U &tau;&frac12; &amp; HURST</span>
           <span class="telem-val" style="color:{'#10B981' if ou_hl <= 4.5 else ('#F43F5E' if ou_hl > 7.5 else '#FB923C')};">{ou_hl:.1f}d</span>
-          <span class="telem-sub">Hurst {hurst_val:.2f} &bull; {playbook_name}</span>
+          <span class="telem-sub">Hurst {hurst_val:.2f} &bull; {_html.escape(playbook_name)}</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -1409,6 +1595,18 @@ st.markdown(
     </div>
     """),
     unsafe_allow_html=True,
+)
+edu.render_edu_drawer(
+    "elasticity_micro",
+    live_ctx={
+        "symbol": active_ticker,
+        "z_score_5d": z_val,
+        "kalman_beta": (quant_edge.get("kalman_beta") if isinstance(quant_edge, dict) else None) or metrics.get("kalman_beta") or metrics.get("beta", 1.15),
+        "ou_half_life": ou_hl,
+        "hurst": hurst_val,
+        "clv": metrics.get("clv_today", metrics.get("clv", 0.0)),
+        "rvol": metrics.get("rvol", 1.0),
+    },
 )
 
 # 5-Pillar Orthogonal Conviction Breakdown + Synergy Gate Badge
@@ -1453,7 +1651,7 @@ st.markdown(
           </span>
         </div>
         <span style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:#CBD5E1;">
-          Tier: <b style="color:#FF8533;">{conv_tier}</b> &bull; Regime Gate: <b>{regime_gate_mult:.2f}x</b>
+          Tier: <b style="color:#FF8533;">{_html.escape(conv_tier)}</b> &bull; Regime Gate: <b>{regime_gate_mult:.2f}x</b>
         </span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;">
@@ -1462,6 +1660,15 @@ st.markdown(
     </div>
     """),
     unsafe_allow_html=True,
+)
+edu.render_edu_drawer(
+    "conviction_5pillar",
+    live_ctx={
+        "conviction_score_200": score_200,
+        "conviction_tier": conv_tier,
+        "synergy_unlocked": synergy_unlocked,
+        "regime_gate_mult": regime_gate_mult,
+    },
 )
 
 # Chart Row (Gauge + 35-Day Rubberband Envelope) & 30-45 DTE High-Delta Trade Ticket
@@ -1634,7 +1841,7 @@ with tab_surface:
             <div class="rm-glass-panel">
               <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
                 <span style="font-size:0.84rem;font-weight:800;color:#FF8533;">OPRA Dealer GEX / Vanna / Charm Pin Corridor &amp; 25D SVI Skew</span>
-                <span style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:#CBD5E1;">{gex_reg}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:#CBD5E1;">{_html.escape(gex_reg)}</span>
               </div>
               <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;font-size:0.76rem;">
                 <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:9px 11px;">
@@ -1644,17 +1851,17 @@ with tab_surface:
                 </div>
                 <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:9px 11px;">
                   <div style="font-size:0.64rem;color:#94A3B8;text-transform:uppercase;">2nd-Order Greeks</div>
-                  <div style="font-family:'JetBrains Mono',monospace;font-weight:800;color:#10B981;margin-top:2px;">{vanna_reg}</div>
-                  <div style="font-size:0.66rem;color:#94A3B8;">{charm_reg}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-weight:800;color:#10B981;margin-top:2px;">{_html.escape(vanna_reg)}</div>
+                  <div style="font-size:0.66rem;color:#94A3B8;">{_html.escape(charm_reg)}</div>
                 </div>
                 <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:9px 11px;">
                   <div style="font-size:0.64rem;color:#94A3B8;text-transform:uppercase;">25&Delta; Skew &amp; SVI Value</div>
-                  <div style="font-family:'JetBrains Mono',monospace;font-weight:800;color:#FF8533;margin-top:2px;">{sk_badge}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-weight:800;color:#FF8533;margin-top:2px;">{_html.escape(sk_badge)}</div>
                   <div style="font-size:0.66rem;color:#94A3B8;">SVI Cheap ${svi_cheap_k:g} &bull; Borrow {imp_borrow_bps:+.0f}bps</div>
                 </div>
                 <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:9px 11px;">
                   <div style="font-size:0.64rem;color:#94A3B8;text-transform:uppercase;">Variance Risk Prem</div>
-                  <div style="font-family:'JetBrains Mono',monospace;font-weight:800;color:#E2E8F0;margin-top:2px;">{base_opt_telem.get('vega_badge', 'FAIR VEGA')} ({base_opt_telem.get('vrp_vol_pts', 0.0):+.1f}v)</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-weight:800;color:#E2E8F0;margin-top:2px;">{_html.escape(str(base_opt_telem.get('vega_badge', 'FAIR VEGA')))} ({base_opt_telem.get('vrp_vol_pts', 0.0):+.1f}v)</div>
                   <div style="font-size:0.66rem;color:#94A3B8;">IV {base_opt_telem.get('iv_pct', 42.0):.1f}% vs HV20 {base_opt_telem.get('hv20_pct', 42.0):.1f}%</div>
                 </div>
               </div>
@@ -1712,7 +1919,7 @@ with tab_surface:
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0 8px 0;">
               <div class="rm-glass-panel" style="margin-bottom:0 !important;border-color:{'rgba(16,185,129,0.45)' if not pref_sp else 'rgba(255,255,255,0.08)'} !important;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                  <b style="color:#F8FAFC;font-size:0.80rem;">Strategy A: Naked {scrub_telem['direction']} (${scrub_telem['strike_used']:.2f})</b>
+                  <b style="color:#F8FAFC;font-size:0.80rem;">Strategy A: Naked {_html.escape(str(scrub_telem['direction']))} (${scrub_telem['strike_used']:.2f})</b>
                   <span style="font-family:'JetBrains Mono',monospace;font-size:0.66rem;color:{'#10B981' if not pref_sp else '#94A3B8'};">{'OPTIMAL' if not pref_sp else 'UNHEDGED VEGA'}</span>
                 </div>
                 <div style="font-family:'JetBrains Mono',monospace;font-size:1.0rem;font-weight:800;color:{'#10B981' if scrub_telem['naked_roi_pct'] >= 10 else '#FB923C'};">
@@ -1737,6 +1944,18 @@ with tab_surface:
             </div>
             """),
             unsafe_allow_html=True,
+        )
+        edu.render_edu_drawer(
+            "options_surface",
+            live_ctx={
+                "opra_iv": scrub_telem.get("iv_pct", 35.0),
+                "hv20": scrub_telem.get("hv20_pct", 35.0),
+                "net_gex_m": gw_info.get("net_gex_m", 0.0),
+                "gamma_flip_strike": g_flip_k,
+                "net_vanna_m": gw_info.get("net_vanna_m", 0.0),
+                "variance_rent_ratio": scrub_telem.get("variance_rent_ratio", 1.0),
+                "prefer_spread": pref_sp,
+            },
         )
 
         _arm_label = (
@@ -1789,7 +2008,7 @@ with tab_surface:
             chain_df=surf_chain_df,
             skew_optimizer=skew_opt,
         )
-        st.plotly_chart(strike_dot_fig, width="stretch", config={"scrollZoom": True, "displayModeBar": "hover", "displaylogo": False, "responsive": True})
+        st.plotly_chart(strike_dot_fig, width="stretch", config={"displayModeBar": "hover", "displaylogo": False, "responsive": True})
 
         svi_term_fig = rbc.create_iv_smile_and_term_structure_chart(active_cand, chain_df=surf_chain_df)
         st.plotly_chart(svi_term_fig, width="stretch", config={"displayModeBar": False, "responsive": True})
@@ -1865,7 +2084,7 @@ with tab_fund:
             <div class="rm-glass-panel" style="border-color:rgba(255,107,0,0.40) !important;">
               <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
                 <div>
-                  <span style="font-size:0.86rem;font-weight:800;color:#FF8533;"><i class="fa-solid fa-layer-group" style="margin-right:6px;"></i>ETF Basket Shield Active ({active_ticker})</span>
+                  <span style="font-size:0.86rem;font-weight:800;color:#FF8533;"><i class="fa-solid fa-layer-group" style="margin-right:6px;"></i>ETF Basket Shield Active ({_html.escape(active_ticker)})</span>
                   <div style="font-size:0.76rem;color:#CBD5E1;margin-top:3px;">
                     Thematic ETF baskets bypass corporate balance-sheet &amp; single-name earnings traps with diversified constituent liquidity.
                   </div>
@@ -1883,7 +2102,7 @@ with tab_fund:
             clean_html(f"""
             <div class="rm-glass-panel">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-                <span style="font-size:0.84rem;font-weight:800;color:#FF8533;"><i class="fa-solid fa-shield-halved" style="margin-right:6px;"></i>FMP Ultra Solvency Scorecard ({active_ticker})</span>
+                <span style="font-size:0.84rem;font-weight:800;color:#FF8533;"><i class="fa-solid fa-shield-halved" style="margin-right:6px;"></i>FMP Ultra Solvency Scorecard ({_html.escape(active_ticker)})</span>
                 <span style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:800;color:{'#10B981' if f_score_val >= 62 else ('#F43F5E' if f_score_val < 46 else '#FB923C')};">{f_score_val:.1f} / 100</span>
               </div>
               <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;font-size:0.76rem;">
@@ -1911,10 +2130,19 @@ with tab_fund:
 
     active_float_data = cached_get_equity_float(active_ticker)
     st.markdown(clean_html(rbc.create_float_topology_card_html(active_ticker, active_float_data)), unsafe_allow_html=True)
+    edu.render_edu_drawer(
+        "fundamentals_float",
+        live_ctx={
+            "altman_z": altman_z,
+            "piotroski_score": piotroski_f,
+            "short_pct": active_float_data.get("short_pct", 0.0) if isinstance(active_float_data, dict) else 0.0,
+            "is_etf": is_etf_active,
+        },
+    )
 
     st.markdown("<div style='font-size:0.84rem;font-weight:800;color:#E2E8F0;margin:12px 0 6px 0;'>Sector Bifurcation Matrix (Stretch vs. Quality)</div>", unsafe_allow_html=True)
     matrix_fig = rbc.create_rubberband_tension_matrix(ranked_by_conv, active_ticker=active_ticker)
-    st.plotly_chart(matrix_fig, width="stretch", config={"scrollZoom": True, "displayModeBar": "hover", "displaylogo": False, "responsive": True})
+    st.plotly_chart(matrix_fig, width="stretch", config={"displayModeBar": "hover", "displaylogo": False, "responsive": True})
 
 
 # -------------------------------------------------------------------------
@@ -1949,6 +2177,13 @@ with tab_macro:
     )
     compass_fig = rbc.create_cross_asset_rotation_compass(compass_data, active_benchmark=benchmark_symbol, height=480)
     st.plotly_chart(compass_fig, width="stretch", config={"displayModeBar": False, "responsive": True})
+    edu.render_edu_drawer(
+        "cross_asset_macro",
+        live_ctx={
+            "rotation_badge": compass_data.get("rotation_badge", "MACRO ROTATION"),
+            "smart_money_score": sm_radar.get("smart_money_score", 70.0),
+        },
+    )
 
     # 7-Pillar US Economic Spider + 6-Pillar Macro Impulse
     m_c1, m_c2 = st.columns(2, gap="medium")
@@ -1989,7 +2224,7 @@ with tab_macro:
             sw_col = "#10B981" if sw_side == "CALL" else "#F43F5E"
             sweeps_cards += (
                 f'<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:9px;padding:6px 10px;display:flex;justify-content:space-between;font-family:JetBrains Mono,monospace;font-size:0.72rem;">'
-                f'<b style="color:#F8FAFC;">{_html.escape(str(sw.get("symbol", "")))} ${float(sw.get("strike", 0.0)):g}{sw_side[0]}</b>'
+                f'<b style="color:#F8FAFC;">{_html.escape(str(sw.get("symbol", "")))} ${float(sw.get("strike", 0.0)):g}{_html.escape(sw_side[:1])}</b>'
                 f'<span style="color:{sw_col};">{float(sw.get("ratio", 1.0)):.1f}x Vol/OI</span>'
                 f'</div>'
             )
@@ -2020,11 +2255,22 @@ with tab_audit:
     @st.fragment
     def _render_tab_audit_fragment():
         st.markdown(
-            f"<div style='font-size:0.84rem;font-weight:800;color:#FF8533;margin-bottom:6px;'>5-Year Empirical MFE/MAE Excursion Profile ({active_ticker} · n={emp_n} · {emp_win_pct:.0f}% Win)</div>",
+            f"<div style='font-size:0.84rem;font-weight:800;color:#FF8533;margin-bottom:6px;'>5-Year Empirical MFE/MAE Excursion Profile ({_html.escape(active_ticker)} · n={emp_n} · {emp_win_pct:.0f}% Win)</div>",
             unsafe_allow_html=True,
         )
         emp_exc_fig = rbc.create_empirical_excursion_profile_chart(active_ticker, metrics)
         st.plotly_chart(emp_exc_fig, width="stretch", config={"displayModeBar": False, "responsive": True})
+        edu.render_edu_drawer(
+            "ev_kelly_backtest",
+            live_ctx={
+                "net_ev_pct": quant_edge.get("net_ev_pct", 0.0),
+                "bayesian_win_prob_pct": quant_edge.get("bayesian_win_prob_pct", emp_win_pct),
+                "empirical_win_rate_pct": emp_win_pct,
+                "quarter_kelly_pct": quant_edge.get("quarter_kelly_pct", 0.0),
+                "spread_friction_pct": (skew_opt.get("spread_friction_pct") if isinstance(skew_opt, dict) else None) or quant_edge.get("spread_friction_pct", 6.0),
+                "edge_t_stat": quant_edge.get("edge_t_stat", 0.0),
+            },
+        )
 
         if ranked_by_conv:
             tbl_rows = []
@@ -2051,7 +2297,7 @@ with tab_audit:
             st.dataframe(pd.DataFrame(tbl_rows), width="stretch", hide_index=True)
 
         st.markdown("---")
-        st.markdown(f"#### <i class='fa-solid fa-brain' style='color:#FF6B00;'></i> {active_model_name} Trade Arbiter ({active_ticker})", unsafe_allow_html=True)
+        st.markdown(f"#### <i class='fa-solid fa-brain' style='color:#FF6B00;'></i> {_html.escape(active_model_name)} Trade Arbiter ({_html.escape(active_ticker)})", unsafe_allow_html=True)
         arb_cols = st.columns(5, gap="small")
         arb_modes = [
             ("Trade Thesis", "thesis"),
@@ -2083,10 +2329,8 @@ with tab_audit:
                 )
 
         if st.session_state.get(f"active_audit_result_{active_ticker}"):
-            st.markdown(
-                f'<div class="rm-glass-panel">{st.session_state[f"active_audit_result_{active_ticker}"]}</div>',
-                unsafe_allow_html=True,
-            )
+            with st.container(border=True):
+                st.markdown(str(st.session_state[f"active_audit_result_{active_ticker}"]))
 
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]):
@@ -2104,7 +2348,7 @@ with tab_audit:
                     ans = st.session_state.agent_session.query(ctx_prefix + user_q, st.session_state.chat_history[:-1])
                     st.markdown(ans.get("text", ""))
                     st.session_state.chat_history.append({"role": "assistant", "content": ans.get("text", "")})
-                    st.rerun()
+                    st.rerun(scope="fragment")
 
         with st.expander("🏛️ PM Keep / Tab / 86 Audit", expanded=False):
             st.markdown(

@@ -359,10 +359,10 @@ def get_smart_money_stealth_radar() -> Dict[str, Any]:
     insider_clusters = get_insider_open_market_clusters(limit=25)
     senate_trades = get_senate_recent_trades(limit=15)
 
-    # Batch quote top candidates + all 32 core power tickers for live institutional tape accumulation
-    top_syms = [c["symbol"] for c in insider_clusters[:14]]
+    # Batch quote all insider clusters + all 32 core power tickers for live institutional tape accumulation
+    top_syms = [c["symbol"] for c in insider_clusters]
     power_core_list = list(ALL_POWER_TICKERS.keys())
-    all_syms = list(set(top_syms + power_core_list))
+    all_syms = list(dict.fromkeys(top_syms + power_core_list))
     quotes_map = rbe3.fmp_batch_quotes(all_syms, ttl=240)
 
     # Compute Live Institutional Tape Accumulation Score (0-100) across Power Sector leaders
@@ -398,8 +398,8 @@ def get_smart_money_stealth_radar() -> Dict[str, Any]:
         chg = float(q.get("changePercentage", 0.0) or 0.0)
         company_name = q.get("name", sym)
 
-        # Flag sub-$2.5B market cap names or unlisted emerging innovators
-        if 0 < mcap <= 2_500_000_000 or mcap == 0:
+        # Flag verified sub-$2.5B market cap names (exclude unquoted/missing-mcap large caps)
+        if 0 < mcap <= 2_500_000_000:
             mcap_str = f"${mcap / 1_000_000:.1f}M" if mcap > 0 else "Sub-$2B"
             p_sec = c.get("power_sector")
             if p_sec:
