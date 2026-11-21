@@ -1,0 +1,25 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Virtual environments & Python caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite databases & journals
+data/*.db
+data/*.db-wal
+data/*.db-shm
+intel_bus/*.db
+intel_bus/*.db-wal
+intel_bus/*.db-shm
+
+# Scratch & OS artifacts
+scratch/
+.DS_Store
+Thumbs.db
