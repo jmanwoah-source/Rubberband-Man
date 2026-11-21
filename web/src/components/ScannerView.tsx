@@ -137,7 +137,7 @@ export function ScannerView({
         </div>
 
         {catDays.length > 0 && (
-          <div className="mt-3 grid grid-cols-5 gap-1.5 sm:gap-2">
+          <div className="mt-3 flex snap-x snap-mandatory gap-2 overflow-x-auto pb-0.5 no-scrollbar sm:grid sm:grid-cols-5 sm:overflow-visible sm:pb-0">
             {catDays.map((d, idx) => {
               const pct = Math.max(12, Math.min(100, n(d.intensity_pct, 45)))
               const r = 13
@@ -152,7 +152,7 @@ export function ScannerView({
               return (
                 <div
                   key={`${d.day_short ?? idx}-${idx}`}
-                  className={`flex items-center gap-2 rounded-xl border px-2 py-1.5 ${
+                  className={`flex min-w-[138px] shrink-0 snap-start items-center gap-2.5 rounded-xl border px-2.5 py-2 sm:min-w-0 sm:shrink ${
                     d.is_today
                       ? 'border-[#FF6B00]/40 bg-[#FF6B00]/[0.07]'
                       : 'border-white/[0.05] bg-white/[0.02]'
@@ -173,10 +173,10 @@ export function ScannerView({
                     />
                   </svg>
                   <div className="min-w-0">
-                    <div className="font-mono-num truncate text-[10px] font-bold text-slate-200">
+                    <div className="font-mono-num whitespace-nowrap text-[11px] font-bold text-slate-100">
                       {d.day_short} {d.day_num}
                     </div>
-                    <div className="truncate text-[9px] font-medium text-slate-400">
+                    <div className="truncate text-[10px] font-medium text-slate-400" title={s(d.headline_tag, 'FLOW')}>
                       {s(d.headline_tag, 'FLOW')}
                     </div>
                   </div>
