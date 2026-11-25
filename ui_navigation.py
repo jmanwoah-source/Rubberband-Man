@@ -99,7 +99,6 @@ def _navigate_to(target_view: str, target_density: str = "pro") -> None:
     set_density_mode(target_density)
     st.session_state["pending_workspace_view"] = target_view
     st.session_state["active_app_view"] = target_view
-    st.session_state["mobile_workspace_nav_select_top"] = target_view
     try:
         slug = _VIEW_TO_PAGE_SLUG.get(target_view, "terminal")
         if slug == "terminal":

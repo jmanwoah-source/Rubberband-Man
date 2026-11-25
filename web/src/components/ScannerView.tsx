@@ -2,6 +2,12 @@ import { useId } from 'react'
 import { motion } from 'framer-motion'
 import { Activity, ArrowUpRight, ShieldCheck, SlidersHorizontal } from 'lucide-react'
 import type { BootstrapResponse, TradePrefill } from '../types'
+import {
+  computeDteFromIso,
+  defaultNextMonthlyFriday,
+  formatStrike,
+  normalizeExpirationIso,
+} from '../utils/dates'
 import { ElasticityChart } from './ElasticityChart'
 import { LearnChip } from './LearnChip'
 import { TradeAnatomyCorridor } from './TradeAnatomyCorridor'
@@ -22,6 +28,15 @@ function n(val: unknown, fallback = 0): number {
 
 function s(val: unknown, fallback = ''): string {
   return val == null ? fallback : String(val)
+}
+
+function catalystToneStroke(tone?: string): string {
+  const norm = String(tone ?? '').trim().toLowerCase()
+  if (norm === 'rose' || norm === 'high' || norm === 'binary') return '#F43F5E'
+  if (norm === 'amber' || norm === 'elevated') return '#FF6B00'
+  if (norm === 'cyan') return '#38BDF8'
+  if (norm === 'emerald' || norm === 'clear') return '#10B981'
+  return '#94A3B8'
 }
 
 export function ScannerView({
@@ -56,7 +71,9 @@ export function ScannerView({
   )
   const convTier = s(cand.conviction_tier ?? bp.conviction_tier, 'WATCH')
   const recDte = Math.round(n(cand.recommended_dte ?? bp.recommended_dte, 35))
-  const optExp = s(near.expiry ?? bp.target_expiration, '2026-12-18')
+  const rawOptExp = s(near.expiry ?? bp.target_expiration, '')
+  const optExpIso = rawOptExp ? normalizeExpirationIso(rawOptExp, recDte) : defaultNextMonthlyFriday()
+  const optExpDisplay = rawOptExp || optExpIso
   const optStrike = n(near.strike ?? tel.strike_used ?? m.recommended_strike, spot)
   const optMid = n(near.mid ?? tel.prem_entry, Math.max(0.5, spot * 0.03))
   const optDelta = n(near.delta ?? m.estimated_delta, isPut ? -0.5 : 0.5)
@@ -69,6 +86,11 @@ export function ScannerView({
 
   const netEv = n(qe.net_ev_pct ?? bp.net_ev_pct, 0)
   const qKellyPct = n(qe.quarter_kelly_pct ?? bp.quarter_kelly_pct, 0)
+  const expectedBasisPct = n(m.expected_basis_pct, 0)
+  const whaleBadge = s(m.whale_badge, 'TWO-WAY FLOW')
+  const rawIv = n(near.iv ?? tel.iv_pct ?? m.implied_volatility, 0)
+  const impliedVolAtEntry =
+    rawIv > 0 ? Number((rawIv > 3 ? rawIv / 100 : rawIv).toFixed(4)) : null
 
   const macroSymb = (data.catalyst_outlook?.symbolism ?? data.macro_pulse?.symbolism ?? {}) as Record<
     string,
@@ -82,6 +104,10 @@ export function ScannerView({
   )
   const binRisk = s(data.catalyst_outlook?.binary_risk_level, 'MODERATE')
   const catDays = (data.catalyst_outlook?.days ?? []).slice(0, 5)
+  const todayHeadline = s(
+    catDays.find((d) => d.is_today)?.headline_tag ?? catDays[0]?.headline_tag ?? binRisk,
+    '',
+  )
 
   const pillarRows = [
     { key: 'elasticity_kalman', label: 'Elasticity', max: 65 },
@@ -94,20 +120,30 @@ export function ScannerView({
   const top5List = data.ranked_candidates.slice(0, 5)
 
   const handleStageOrder = () => {
-    const useSpread = preferSpread && shortStrike != null && shortStrike > 0
+    const useSpread =
+      preferSpread &&
+      shortStrike != null &&
+      shortStrike > 0 &&
+      Math.abs(shortStrike - optStrike) >= 0.01
+    const stageDte = computeDteFromIso(optExpIso, recDte)
     onSimulate({
       symbol: data.active_ticker,
+      action: 'BUY_TO_OPEN',
       option_type: isPut ? 'PUT' : 'CALL',
       strategy: useSpread ? 'VERTICAL_DEBIT_SPREAD' : 'SINGLE_LEG',
       strike: optStrike,
       short_strike: useSpread ? shortStrike : null,
-      expiration_date: optExp.length >= 10 ? optExp.slice(0, 10) : '2026-12-18',
-      dte: recDte,
+      expiration_date: optExpIso,
+      dte: stageDte,
       limit_price: useSpread ? netDebit : optMid,
       stock_price_at_entry: spot,
       target_stock_price: tgtPrice,
       stop_stock_price: stpPrice,
       conviction_score: score200,
+      expected_basis_pct: expectedBasisPct,
+      whale_badge: whaleBadge,
+      catalyst_tag: todayHeadline,
+      implied_vol_at_entry: impliedVolAtEntry,
       notes: `${action} ${data.active_ticker} | Conv ${score200 >= 0 ? '+' : ''}${score200} (${convTier}) | Dual Z ${z5.toFixed(2)}σ`,
     })
   }
@@ -123,7 +159,10 @@ export function ScannerView({
               {regimeLbl}
             </span>
             <span className="font-mono-num rounded-full border border-white/[0.06] bg-white/[0.02] px-2.5 py-1 text-[11px] text-slate-300">
-              VIX Term <strong className={vixRatio >= 1 ? 'text-rose-400' : 'text-emerald-400'}>{vixRatio.toFixed(2)}x</strong>
+              VIX Term{' '}
+              <strong className={vixRatio >= 1 ? 'text-rose-400' : 'text-emerald-400'}>
+                {vixRatio.toFixed(2)}x
+              </strong>
             </span>
             <span className="font-mono-num rounded-full border border-white/[0.06] bg-white/[0.02] px-2.5 py-1 text-[11px] text-slate-300">
               Cap <strong className="text-slate-100">{capPct}%</strong>
@@ -143,12 +182,7 @@ export function ScannerView({
               const r = 13
               const circ = 2 * Math.PI * r
               const dashOffset = circ * (1 - pct / 100)
-              const strokeCol =
-                d.risk_tone === 'HIGH' || d.risk_tone === 'BINARY'
-                  ? '#FF6B00'
-                  : d.risk_tone === 'CLEAR'
-                    ? '#10B981'
-                    : '#94A3B8'
+              const strokeCol = catalystToneStroke(d.risk_tone)
               return (
                 <div
                   key={`${d.day_short ?? idx}-${idx}`}
@@ -159,7 +193,14 @@ export function ScannerView({
                   }`}
                 >
                   <svg className="h-8 w-8 shrink-0 -rotate-90" viewBox="0 0 34 34">
-                    <circle cx="17" cy="17" r={r} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="2.5" />
+                    <circle
+                      cx="17"
+                      cy="17"
+                      r={r}
+                      fill="none"
+                      stroke="rgba(255,255,255,0.08)"
+                      strokeWidth="2.5"
+                    />
                     <circle
                       cx="17"
                       cy="17"
@@ -176,7 +217,10 @@ export function ScannerView({
                     <div className="font-mono-num whitespace-nowrap text-[11px] font-bold text-slate-100">
                       {d.day_short} {d.day_num}
                     </div>
-                    <div className="truncate text-[10px] font-medium text-slate-400" title={s(d.headline_tag, 'FLOW')}>
+                    <div
+                      className="truncate text-[10px] font-medium text-slate-400"
+                      title={s(d.headline_tag, 'FLOW')}
+                    >
                       {s(d.headline_tag, 'FLOW')}
                     </div>
                   </div>
@@ -303,7 +347,10 @@ export function ScannerView({
                     {chg1d >= 0 ? '+' : ''}
                     {chg1d.toFixed(2)}%
                   </span>
-                  <span className="text-[11px] text-slate-400">Z {z5 >= 0 ? '+' : ''}{z5.toFixed(2)}σ</span>
+                  <span className="text-[11px] text-slate-400">
+                    Z {z5 >= 0 ? '+' : ''}
+                    {z5.toFixed(2)}σ
+                  </span>
                 </div>
               </div>
 
@@ -364,14 +411,14 @@ export function ScannerView({
               <div className="flex items-center justify-between text-[11px] text-slate-400">
                 <span className="font-bold text-slate-200">
                   {preferSpread && shortStrike
-                    ? `Vertical Spread $${optStrike.toFixed(0)}/$${shortStrike.toFixed(0)}`
+                    ? `Vertical Spread ${formatStrike(optStrike)}/${formatStrike(shortStrike)}`
                     : `${recDte}D High-Delta Contract`}
                 </span>
-                <span className="font-mono-num">{optExp}</span>
+                <span className="font-mono-num">{optExpDisplay}</span>
               </div>
               <div className="font-mono-num mt-2 flex items-baseline justify-between">
                 <span className="text-base font-extrabold text-white">
-                  ${optStrike.toFixed(2)} {isPut ? 'PUT' : 'CALL'}
+                  {formatStrike(optStrike)} {isPut ? 'PUT' : 'CALL'}
                 </span>
                 <span className="text-base font-extrabold text-emerald-400">
                   ${(preferSpread && shortStrike ? netDebit : optMid).toFixed(2)}{' '}
@@ -400,7 +447,7 @@ export function ScannerView({
               </div>
             </div>
 
-            <div className="font-mono-num mt-3 flex items-center justify-between text-[11px] text-slate-400">
+            <div className="font-mono-num mt-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
               <span>
                 5Y Win <strong className="text-slate-200">{empWin.toFixed(0)}%</strong>
               </span>
@@ -431,6 +478,7 @@ export function ScannerView({
               Simulate in Schwab
               <ArrowUpRight className="h-3.5 w-3.5" />
             </button>
+            <LearnChip topic={data.edu_topics.ev_kelly_backtest} enabled={learnEnabled} label="EV & Kelly" />
             <LearnChip topic={data.edu_topics.mobile_hero} enabled={learnEnabled} label="Hero Guide" />
           </div>
         </motion.div>
@@ -444,6 +492,7 @@ export function ScannerView({
               strike={optStrike}
               targetPrice={tgtPrice}
               stopPrice={stpPrice}
+              isPut={isPut}
             />
             <div className="flex flex-wrap items-center justify-end gap-2">
               <LearnChip topic={data.edu_topics.elasticity_micro} enabled={learnEnabled} label="Elasticity" />
@@ -539,7 +588,7 @@ export function ScannerView({
                     {Math.round(row.conviction_score_200)}
                   </span>
                   <span className="font-mono-num text-xs text-slate-300">
-                    ${n(row.strike, 0).toFixed(0)} {rowAct.includes('PUT') ? 'P' : 'C'} ·{' '}
+                    {formatStrike(n(row.strike, 0))} {rowAct.includes('PUT') ? 'P' : 'C'} ·{' '}
                     {Math.round(n(row.recommended_dte, 35))}D
                   </span>
                 </div>

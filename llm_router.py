@@ -7,11 +7,12 @@ and Cloud Google Gemini 2.5 Flash with intelligent auto-discovery and failover.
 
 import os
 import time
+from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 DEFAULT_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
 

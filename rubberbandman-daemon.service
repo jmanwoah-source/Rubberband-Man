@@ -1,0 +1,21 @@
+# Template systemd user unit — dynamically rendered and installed by ./setup_systemd.sh
+[Unit]
+Description=Rubberband Man - 24/7 Daily Top-5 Snapshot & Backup Daemon (@USER@)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=-@REPO_DIR@/.env
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=@PYTHON_BIN@ @REPO_DIR@/daily_tracker_daemon.py --daemon --interval 1800
+Restart=always
+RestartSec=15
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

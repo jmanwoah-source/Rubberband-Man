@@ -15,6 +15,7 @@ interface ElasticityChartProps {
   strike?: number
   targetPrice?: number
   stopPrice?: number
+  isPut?: boolean
   height?: number
 }
 
@@ -24,19 +25,18 @@ export function ElasticityChart({
   strike,
   targetPrice,
   stopPrice,
+  isPut = false,
   height = 310,
 }: ElasticityChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const lastBar = bars[bars.length - 1]
+  const scopeKey = `${symbol}|${lastBar?.time ?? ''}|${bars.length}`
   const [hoverInfo, setHoverInfo] = useState<{
+    scopeKey: string
     time: string
     close: number
     vwma20: number
   } | null>(null)
-
-  useEffect(() => {
-    setHoverInfo(null)
-  }, [symbol, bars])
 
   useEffect(() => {
     const el = containerRef.current
@@ -125,13 +125,14 @@ export function ElasticityChart({
       })
     }
     if (targetPrice && targetPrice > 0) {
+      const targetIsBearish = isPut || (strike != null && strike > 0 && targetPrice < strike)
       candleSeries.createPriceLine({
         price: targetPrice,
         color: '#10B981',
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
-        title: '+1σ Target',
+        title: targetIsBearish ? '-1σ Target' : '+1σ Target',
       })
     }
     if (stopPrice && stopPrice > 0) {
@@ -153,7 +154,12 @@ export function ElasticityChart({
       }
       const match = byTime.get(param.time)
       if (match) {
-        setHoverInfo({ time: match.time, close: match.close, vwma20: match.vwma20 })
+        setHoverInfo({
+          scopeKey,
+          time: match.time,
+          close: match.close,
+          vwma20: match.vwma20,
+        })
       }
     })
 
@@ -172,15 +178,19 @@ export function ElasticityChart({
       ro.disconnect()
       chart.remove()
     }
-  }, [bars, strike, targetPrice, stopPrice, height])
+  }, [bars, strike, targetPrice, stopPrice, isPut, height, scopeKey])
 
-  const hud = hoverInfo ?? (lastBar ? { time: lastBar.time, close: lastBar.close, vwma20: lastBar.vwma20 } : null)
+  const activeHover = hoverInfo && hoverInfo.scopeKey === scopeKey ? hoverInfo : null
+  const hud =
+    activeHover ?? (lastBar ? { time: lastBar.time, close: lastBar.close, vwma20: lastBar.vwma20 } : null)
 
   return (
     <div className="obsidian-card overflow-hidden rounded-2xl p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-1">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-bold tracking-tight text-slate-200">{symbol} Price &amp; VWMA-20 Envelope</span>
+          <span className="text-xs font-bold tracking-tight text-slate-200">
+            {symbol} Price &amp; VWMA-20 Envelope
+          </span>
           <span className="font-mono-num hidden rounded border border-white/[0.06] bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-slate-400 sm:inline">
             ±2σ ATR Channel
           </span>

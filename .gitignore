@@ -11,10 +11,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# SQLite databases & journals
+# SQLite databases, backups, & runtime state
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/backups/
+data/.daemon_heartbeat
+data/watchlist.json
 intel_bus/*.db
 intel_bus/*.db-wal
 intel_bus/*.db-shm

@@ -1,13 +1,37 @@
+# Git metadata
 .git/
 .gitignore
+.gitattributes
+
+# Secrets & local environment files
 .env
 .env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Python virtual environments & bytecode caches
 .venv/
 venv/
 __pycache__/
 *.py[cod]
-data/
+*$py.class
+.pytest_cache/
+
+# Frontend dependencies & local build output (rebuilt inside Stage 1 of Dockerfile)
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Runtime SQLite databases, backups, signals & scratch artifacts (mounted via volumes)
+data/*.db*
+data/backups/
+data/.daemon_heartbeat
+data/watchlist.json
+intel_bus/*.db*
+signals/
 scratch/
 tests/
+
+# OS & editor junk
 .DS_Store
 Thumbs.db

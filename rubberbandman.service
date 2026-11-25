@@ -1,16 +1,21 @@
+# Template systemd user unit — dynamically rendered and installed by ./setup_systemd.sh
 [Unit]
-Description=Rubberband Man - AI Options Divergence Terminal
-After=network.target
+Description=Rubberband Man - FastAPI + React PWA Options Terminal (@USER@)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/RubberbandMan
-ExecStart=%h/RubberbandMan/.venv/bin/python -m streamlit run rubberband.py --server.port 8501 --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=-@REPO_DIR@/.env
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/bin/sh -c 'exec "@PYTHON_BIN@" -m uvicorn api_server:app --host 0.0.0.0 --port "${PORT:-8080}"'
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
 StandardOutput=journal
 StandardError=journal
-Environment="PYTHONUNBUFFERED=1"
 
 [Install]
 WantedBy=default.target

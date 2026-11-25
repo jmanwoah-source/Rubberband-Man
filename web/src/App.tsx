@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useId, useState } from 'react'
+import { Component, useEffect, useId, useState } from 'react'
+import type { ErrorInfo, ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { BarChart3, BookOpen, GraduationCap, Search, Zap } from 'lucide-react'
+import { BarChart3, BookOpen, GraduationCap, RefreshCw, Search, Zap } from 'lucide-react'
 import { fetchBootstrap } from './api'
 import { LedgerView } from './components/LedgerView'
 import { ScannerView } from './components/ScannerView'
@@ -15,6 +16,45 @@ const NAV_TABS: Array<{ id: AppTab; label: string; Icon: typeof Zap }> = [
   { id: 'ledger', label: 'Ledger', Icon: BarChart3 },
 ]
 
+interface ErrorBoundaryState {
+  hasError: boolean
+  message: string
+}
+
+class AppErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { hasError: false, message: '' }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, message: error?.message || 'Unexpected rendering failure.' }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Rubberband UI ErrorBoundary caught:', error, info)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="mx-auto mt-10 max-w-lg rounded-2xl border border-rose-500/35 bg-[#0C1018] p-6 text-center shadow-2xl">
+          <h2 className="text-base font-extrabold tracking-tight text-white">
+            Workspace View Interrupted
+          </h2>
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">{this.state.message}</p>
+          <button
+            type="button"
+            onClick={() => this.setState({ hasError: false, message: '' })}
+            className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-[#FF6B00] px-4 py-2 text-xs font-extrabold text-white transition hover:bg-[#FF7D1F] active:scale-95"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            Recover Workspace
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 export function App() {
   const navId = useId()
   const [activeTab, setActiveTab] = useState<AppTab>('scan')
@@ -22,36 +62,41 @@ export function App() {
   const [ticker, setTicker] = useState('')
   const [searchInput, setSearchInput] = useState('')
   const [learnEnabled, setLearnEnabled] = useState(true)
+  const [retryNonce, setRetryNonce] = useState(0)
 
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [settledKey, setSettledKey] = useState('')
+  const [errorState, setErrorState] = useState<{ key: string; msg: string } | null>(null)
   const [prefill, setPrefill] = useState<TradePrefill | null>(null)
 
-  const loadData = useCallback((sec: string, tk: string, signal?: AbortSignal) => {
-    setLoading(true)
-    setErrorMsg(null)
-    fetchBootstrap(sec, tk, signal)
-      .then((res) => {
-        setBootstrap(res)
-      })
-      .catch((err) => {
-        if ((err as Error).name !== 'AbortError') {
-          setErrorMsg((err as Error).message)
-        }
-      })
-      .finally(() => setLoading(false))
-  }, [])
+  const requestKey = `${sector}|${ticker}|${retryNonce}`
+  const loading = settledKey !== requestKey
+  const errorMsg = errorState?.key === requestKey ? errorState.msg : null
 
   useEffect(() => {
     const ac = new AbortController()
-    loadData(sector, ticker, ac.signal)
+    fetchBootstrap(sector, ticker, ac.signal)
+      .then((res) => {
+        if (ac.signal.aborted) return
+        setBootstrap(res)
+        setErrorState(null)
+        setSettledKey(requestKey)
+      })
+      .catch((err) => {
+        if (ac.signal.aborted || (err as Error).name === 'AbortError') return
+        setErrorState({ key: requestKey, msg: (err as Error).message })
+        setSettledKey(requestKey)
+      })
     return () => ac.abort()
-  }, [sector, ticker, loadData])
+  }, [sector, ticker, requestKey])
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    const clean = searchInput.trim().toUpperCase().replace(/[^A-Z0-9.-]/g, '').slice(0, 10)
+    const clean = searchInput
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9.^-]/g, '')
+      .slice(0, 12)
     if (clean) {
       setTicker(clean)
       setSearchInput('')
@@ -62,6 +107,10 @@ export function App() {
   const handleSimulate = (order: TradePrefill) => {
     setPrefill(order)
     setActiveTab('sim')
+  }
+
+  const handleRetryBootstrap = () => {
+    setRetryNonce((n) => n + 1)
   }
 
   return (
@@ -101,7 +150,11 @@ export function App() {
                       className="absolute inset-0 rounded-full bg-[#FF6B00]"
                     />
                   )}
-                  <span className={`relative z-10 flex items-center gap-1.5 ${active ? 'text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                  <span
+                    className={`relative z-10 flex items-center gap-1.5 ${
+                      active ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
                     <Icon className="h-3.5 w-3.5" />
                     {label}
                   </span>
@@ -117,6 +170,7 @@ export function App() {
               <input
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
+                maxLength={12}
                 placeholder="Ticker..."
                 aria-label="Quick ticker search"
                 className="font-mono-num w-24 rounded-full border border-white/10 bg-[#0C1018] py-1.5 pl-8 pr-2.5 text-xs text-white placeholder:text-slate-500 outline-none transition focus:w-32 focus:border-[#FF6B00]/60 sm:w-32 sm:focus:w-40"
@@ -142,70 +196,80 @@ export function App() {
 
       {/* Main Content */}
       <main className="mx-auto max-w-7xl px-3.5 pt-4 sm:px-6">
-        {errorMsg && (
-          <div className="mb-4 rounded-2xl border border-rose-500/35 bg-rose-500/10 p-4 text-xs text-rose-200">
-            API Error: {errorMsg}
-          </div>
-        )}
+        <AppErrorBoundary>
+          {errorMsg && (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-500/35 bg-rose-500/10 p-4 text-xs text-rose-200">
+              <span>API Error: {errorMsg}</span>
+              <button
+                type="button"
+                onClick={handleRetryBootstrap}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-rose-400/40 bg-rose-500/20 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-rose-500/30 active:scale-95"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Retry
+              </button>
+            </div>
+          )}
 
-        <AnimatePresence mode="wait">
-          {activeTab === 'scan' && (
-            <motion.div
-              key="view-scan"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.16 }}
-            >
-              {bootstrap ? (
-                <ScannerView
-                  data={bootstrap}
+          <AnimatePresence mode="wait">
+            {activeTab === 'scan' && (
+              <motion.div
+                key="view-scan"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.16 }}
+              >
+                {bootstrap ? (
+                  <ScannerView
+                    data={bootstrap}
+                    learnEnabled={learnEnabled}
+                    loadingTicker={loading}
+                    onSelectSector={(sec) => {
+                      setSector(sec)
+                      setTicker('')
+                    }}
+                    onSelectTicker={(tk) => setTicker(tk)}
+                    onSimulate={handleSimulate}
+                  />
+                ) : (
+                  <div className="space-y-4">
+                    <div className="h-24 animate-pulse rounded-2xl bg-white/[0.04]" />
+                    <div className="h-80 animate-pulse rounded-2xl bg-white/[0.04]" />
+                  </div>
+                )}
+              </motion.div>
+            )}
+
+            {activeTab === 'sim' && (
+              <motion.div
+                key="view-sim"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.16 }}
+              >
+                <SchwabSimView
+                  prefill={prefill}
                   learnEnabled={learnEnabled}
-                  loadingTicker={loading}
-                  onSelectSector={(sec) => {
-                    setSector(sec)
-                    setTicker('')
-                  }}
-                  onSelectTicker={(tk) => setTicker(tk)}
-                  onSimulate={handleSimulate}
+                  onClearPrefill={() => setPrefill(null)}
                 />
-              ) : (
-                <div className="space-y-4">
-                  <div className="h-24 animate-pulse rounded-2xl bg-white/[0.04]" />
-                  <div className="h-80 animate-pulse rounded-2xl bg-white/[0.04]" />
-                </div>
-              )}
-            </motion.div>
-          )}
+              </motion.div>
+            )}
 
-          {activeTab === 'sim' && (
-            <motion.div
-              key="view-sim"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.16 }}
-            >
-              <SchwabSimView
-                prefill={prefill}
-                learnEnabled={learnEnabled}
-                onClearPrefill={() => setPrefill(null)}
-              />
-            </motion.div>
-          )}
-
-          {activeTab === 'ledger' && (
-            <motion.div
-              key="view-ledger"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.16 }}
-            >
-              <LedgerView learnEnabled={learnEnabled} onSimulate={handleSimulate} />
-            </motion.div>
-          )}
-        </AnimatePresence>
+            {activeTab === 'ledger' && (
+              <motion.div
+                key="view-ledger"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.16 }}
+              >
+                <LedgerView learnEnabled={learnEnabled} onSimulate={handleSimulate} />
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </AppErrorBoundary>
       </main>
 
       {/* Mobile Floating Frosted-Glass Bottom Dock */}
@@ -230,7 +294,11 @@ export function App() {
                     className="absolute inset-0 rounded-full bg-[#FF6B00] shadow-lg shadow-[#FF6B00]/30"
                   />
                 )}
-                <span className={`relative z-10 flex items-center gap-1.5 ${active ? 'text-white' : 'text-slate-300'}`}>
+                <span
+                  className={`relative z-10 flex items-center gap-1.5 ${
+                    active ? 'text-white' : 'text-slate-300'
+                  }`}
+                >
                   <Icon className="h-4 w-4" />
                   {label}
                 </span>

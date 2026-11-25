@@ -27,6 +27,7 @@ import json
 import sqlite3
 import threading
 import datetime
+from pathlib import Path
 from contextlib import closing
 from datetime import timedelta
 from zoneinfo import ZoneInfo
@@ -40,7 +41,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from dotenv import load_dotenv
 import marketdata_client
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 FMP_KEY = os.getenv("FMP_API_KEY", "").strip()
 FMP_STABLE_URL = "https://financialmodelingprep.com/stable"
@@ -155,12 +156,20 @@ def _fmp_cache_key(endpoint: str, params: Optional[Dict[str, Any]] = None) -> st
     return f"{endpoint}_{sorted((params or {}).items())}"
 
 
+def _connect_fmp_cache(timeout: float = 15.0) -> sqlite3.Connection:
+    conn = sqlite3.connect(_FMP_CACHE_DB, timeout=timeout)
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=15000;")
+    return conn
+
+
 def _init_fmp_cache_db() -> None:
     try:
         cutoff = time.time() - (7 * 86400)
-        with closing(sqlite3.connect(_FMP_CACHE_DB, timeout=10)) as conn:
+        with closing(_connect_fmp_cache(timeout=15.0)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA auto_vacuum=INCREMENTAL;")
             with conn:
-                conn.execute("PRAGMA journal_mode=WAL;")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS fmp_http_cache (
@@ -171,7 +180,11 @@ def _init_fmp_cache_db() -> None:
                     )
                     """
                 )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_fmp_ts ON fmp_http_cache(ts);"
+                )
                 conn.execute("DELETE FROM fmp_http_cache WHERE ts < ?", (cutoff,))
+            conn.execute("PRAGMA incremental_vacuum(200);")
     except Exception:
         pass
 
@@ -229,27 +242,29 @@ def get_ticker_sector(symbol: str) -> str:
 
 _CACHE_MAX_ENTRIES = 2500  # Cap cache entries to prevent 24/7 memory growth
 
-def get_cached(key: str, ttl: int = CACHE_TTL) -> Optional[Any]:
+
+def get_cached(key: str, ttl: int = CACHE_TTL, allow_stale: bool = False) -> Optional[Any]:
     now = time.time()
     with _CACHE_LOCK:
         if key in _CACHE_STORE:
             val, ts = _CACHE_STORE[key]
-            if now - ts < ttl:
+            if allow_stale or (now - ts < ttl):
                 return val
             del _CACHE_STORE[key]
 
     try:
-        with closing(sqlite3.connect(_FMP_CACHE_DB, timeout=5)) as conn:
+        with closing(_connect_fmp_cache(timeout=15.0)) as conn:
             row = conn.execute(
                 "SELECT payload, ts, ttl FROM fmp_http_cache WHERE cache_key = ?", (key,)
             ).fetchone()
             if row:
                 payload_str, ts, row_ttl = row
                 eff_ttl = max(ttl, int(row_ttl or ttl)) if ttl > CACHE_TTL else min(ttl, int(row_ttl or ttl)) if row_ttl else ttl
-                if now - float(ts) < eff_ttl:
+                if allow_stale or (now - float(ts) < eff_ttl):
                     val = json.loads(payload_str)
-                    with _CACHE_LOCK:
-                        _CACHE_STORE[key] = (val, float(ts))
+                    if not allow_stale:
+                        with _CACHE_LOCK:
+                            _CACHE_STORE[key] = (val, float(ts))
                     return val
     except Exception:
         pass
@@ -272,12 +287,11 @@ def set_cached(key: str, val: Any, ttl: int = CACHE_TTL) -> None:
                     _CACHE_STORE.pop(k, None)
         _CACHE_STORE[key] = (val, now)
         if now - _LAST_FMP_SQLITE_PRUNE_TS >= 3600.0:
-            _LAST_FMP_SQLITE_PRUNE_TS = now
             do_prune = True
 
     try:
         payload_str = json.dumps(val)
-        with closing(sqlite3.connect(_FMP_CACHE_DB, timeout=5)) as conn:
+        with closing(_connect_fmp_cache(timeout=15.0)) as conn:
             with conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO fmp_http_cache (cache_key, ts, ttl, payload) VALUES (?, ?, ?, ?)",
@@ -288,6 +302,10 @@ def set_cached(key: str, val: Any, ttl: int = CACHE_TTL) -> None:
                         "DELETE FROM fmp_http_cache WHERE ts < ? OR (? - ts) > MAX(ttl, 86400)",
                         (now - 7 * 86400, now),
                     )
+            if do_prune:
+                conn.execute("PRAGMA incremental_vacuum(200);")
+                with _CACHE_LOCK:
+                    _LAST_FMP_SQLITE_PRUNE_TS = now
     except Exception:
         # Non-JSON-serializable entries (e.g. DataFrame tuples) remain fast in L1 RAM only
         pass
@@ -301,13 +319,35 @@ def get_ny_now() -> datetime.datetime:
         return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-5)))
 
 
+def _get_fmp_stale_fallback(
+    endpoint: str,
+    params: Dict[str, Any],
+    cache_key: Optional[str],
+) -> Optional[Any]:
+    """Returns last known L1/L2 cached payload when live FMP HTTP fails or rate-limits."""
+    if endpoint == "quote" and "symbol" in params and "," not in str(params["symbol"]):
+        sym_q = str(params["symbol"]).strip().upper()
+        q_stale = get_cached(f"quote_single_{sym_q}", allow_stale=True)
+        if q_stale is not None:
+            return [q_stale]
+    if cache_key:
+        return get_cached(cache_key, allow_stale=True)
+    return None
+
+
 def fmp_get(endpoint: str, params: Optional[Dict[str, Any]] = None, use_cache: bool = True, ttl: int = CACHE_TTL) -> Any:
-    """Execute authenticated FMP Pro request against stable endpoint with L1 RAM + L2 SQLite WAL caching."""
-    api_key = os.getenv("FMP_API_KEY", FMP_KEY).strip()
-    if not api_key:
-        return {"error": "FMP_API_KEY is missing."}
+    """Execute authenticated FMP Pro request against stable endpoint with L1 RAM + L2 SQLite WAL caching and stale fallback."""
     if params is None:
         params = {}
+
+    cache_key = _fmp_cache_key(endpoint, params) if use_cache else None
+    api_key = os.getenv("FMP_API_KEY", FMP_KEY).strip()
+    if not api_key:
+        if use_cache:
+            stale = _get_fmp_stale_fallback(endpoint, params, cache_key)
+            if stale is not None:
+                return stale
+        return {"error": "FMP_API_KEY is missing."}
 
     # Intercept single quote lookups if already populated via batch-quote cache
     if endpoint == "quote" and use_cache and "symbol" in params and "," not in str(params["symbol"]):
@@ -316,7 +356,6 @@ def fmp_get(endpoint: str, params: Optional[Dict[str, Any]] = None, use_cache: b
         if q_cached is not None:
             return [q_cached]
 
-    cache_key = _fmp_cache_key(endpoint, params) if use_cache else None
     if cache_key:
         cached = get_cached(cache_key, ttl=ttl)
         if cached is not None:
@@ -334,8 +373,16 @@ def fmp_get(endpoint: str, params: Optional[Dict[str, Any]] = None, use_cache: b
             if endpoint == "quote" and isinstance(data, list) and len(data) == 1 and "symbol" in data[0]:
                 set_cached(f"quote_single_{data[0]['symbol'].upper()}", data[0], ttl=ttl)
             return data
+        if use_cache and (res.status_code in (401, 403, 429) or res.status_code >= 500):
+            stale = _get_fmp_stale_fallback(endpoint, params, cache_key)
+            if stale is not None:
+                return stale
         return {"error": _redact_secrets(f"HTTP {res.status_code}: {res.text[:250]}")}
     except Exception as e:
+        if use_cache:
+            stale = _get_fmp_stale_fallback(endpoint, params, cache_key)
+            if stale is not None:
+                return stale
         return {"error": _redact_secrets(str(e))}
 
 

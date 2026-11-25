@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ArrowUpRight } from 'lucide-react'
 import { fetchLedger } from '../api'
 import type { LedgerResponse, LedgerSnapshotRow, TradePrefill } from '../types'
+import { computeDteFromIso, defaultNextMonthlyFriday, formatStrike } from '../utils/dates'
 import { LearnChip } from './LearnChip'
 
 interface LedgerViewProps {
@@ -13,41 +14,49 @@ export function LedgerView({ learnEnabled, onSimulate }: LedgerViewProps) {
   const [ledger, setLedger] = useState<LedgerResponse | null>(null)
   const [selectedDate, setSelectedDate] = useState('')
   const [selectedSector, setSelectedSector] = useState('All Sectors')
-  const [loading, setLoading] = useState(true)
-  const [errMsg, setErrMsg] = useState<string | null>(null)
+  const [settledKey, setSettledKey] = useState('')
+  const [errState, setErrState] = useState<{ key: string; msg: string } | null>(null)
+
+  const requestKey = `${selectedDate}|${selectedSector}`
+  const loading = settledKey !== requestKey
+  const errMsg = errState?.key === requestKey ? errState.msg : null
 
   useEffect(() => {
     const ac = new AbortController()
-    setLoading(true)
-    setErrMsg(null)
     fetchLedger(selectedDate, selectedSector, ac.signal)
       .then((res) => {
+        if (ac.signal.aborted) return
         setLedger(res)
-        if (!selectedDate && res.selected_date) {
-          setSelectedDate(res.selected_date)
-        }
+        setErrState(null)
+        setSettledKey(requestKey)
       })
       .catch((err) => {
-        if ((err as Error).name !== 'AbortError') setErrMsg((err as Error).message)
+        if (ac.signal.aborted || (err as Error).name === 'AbortError') return
+        setErrState({ key: requestKey, msg: (err as Error).message })
+        setSettledKey(requestKey)
       })
-      .finally(() => setLoading(false))
     return () => ac.abort()
-  }, [selectedDate, selectedSector])
+  }, [selectedDate, selectedSector, requestKey])
 
   const stageRow = (r: LedgerSnapshotRow) => {
     const isPut = r.action.toUpperCase().includes('PUT')
+    const defaultExp = defaultNextMonthlyFriday()
     onSimulate({
       symbol: r.symbol,
+      action: 'BUY_TO_OPEN',
       option_type: isPut ? 'PUT' : 'CALL',
       strategy: 'SINGLE_LEG',
-      strike: r.recommended_strike && r.recommended_strike > 0 ? r.recommended_strike : r.current_price,
-      expiration_date: '2026-12-18',
-      dte: 35,
+      strike:
+        r.recommended_strike && r.recommended_strike > 0 ? r.recommended_strike : r.current_price,
+      expiration_date: defaultExp,
+      dte: computeDteFromIso(defaultExp, 35),
       limit_price: Math.max(1.0, Number((r.current_price * 0.032).toFixed(2))),
       stock_price_at_entry: r.current_price,
       target_stock_price: r.target_price ?? null,
       stop_stock_price: r.invalidation_price ?? null,
       conviction_score: r.composite_score ?? 50,
+      expected_basis_pct: r.expected_basis_pct ?? 0,
+      whale_badge: r.whale_badge ?? 'TWO-WAY FLOW',
       notes: `Daily Top-5 Ledger (${ledger?.selected_date ?? ''} #${r.rank})`,
     })
   }
@@ -140,53 +149,70 @@ export function LedgerView({ learnEnabled, onSimulate }: LedgerViewProps) {
             No snapshot records recorded yet for this filter.
           </div>
         ) : (
-          (ledger?.snapshots ?? []).map((row, idx) => (
-            <div
-              key={`${row.symbol}-${row.rank}-${idx}`}
-              className="flex flex-wrap items-center justify-between gap-3 px-3 py-3"
-            >
-              <div className="flex items-center gap-3">
-                <span className="font-mono-num text-xs font-bold text-[#FF8533]">#{row.rank}</span>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono-num text-sm font-extrabold text-white">{row.symbol}</span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                        row.action.includes('CALL')
-                          ? 'bg-emerald-500/15 text-emerald-400'
-                          : 'bg-rose-500/15 text-rose-400'
-                      }`}
-                    >
-                      {row.action}
-                    </span>
-                    <span className="text-[11px] text-slate-400">{row.normalized_sector ?? row.sector}</span>
-                  </div>
-                  <div className="font-mono-num mt-0.5 text-[11px] text-slate-400">
-                    Snap ${row.price_at_snapshot.toFixed(2)} → Live ${row.current_price.toFixed(2)} · Strike $
-                    {(row.recommended_strike ?? row.current_price).toFixed(0)}
+          (ledger?.snapshots ?? []).map((row, idx) => {
+            const actUpper = String(row.action ?? '').toUpperCase()
+            const isCall = actUpper.includes('CALL')
+            const isPut = actUpper.includes('PUT')
+            const isNeutral = !isCall && !isPut
+            return (
+              <div
+                key={`${row.symbol}-${row.rank}-${idx}`}
+                className="flex flex-wrap items-center justify-between gap-3 px-3 py-3"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="font-mono-num text-xs font-bold text-[#FF8533]">#{row.rank}</span>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono-num text-sm font-extrabold text-white">{row.symbol}</span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                          isCall
+                            ? 'bg-emerald-500/15 text-emerald-400'
+                            : isPut
+                              ? 'bg-rose-500/15 text-rose-400'
+                              : 'bg-white/[0.07] text-slate-300'
+                        }`}
+                      >
+                        {row.action}
+                      </span>
+                      <span className="text-[11px] text-slate-400">
+                        {row.normalized_sector ?? row.sector}
+                      </span>
+                    </div>
+                    <div className="font-mono-num mt-0.5 text-[11px] text-slate-400">
+                      Snap ${row.price_at_snapshot.toFixed(2)} → Live ${row.current_price.toFixed(2)} · Strike{' '}
+                      {formatStrike(row.recommended_strike ?? row.current_price)}
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="flex items-center gap-3">
-                <span
-                  className={`font-mono-num text-sm font-extrabold ${
-                    row.is_win ? 'text-emerald-400' : 'text-rose-400'
-                  }`}
-                >
-                  {row.directional_pct >= 0 ? '+' : ''}
-                  {row.directional_pct.toFixed(2)}%
-                </span>
-                <button
-                  type="button"
-                  onClick={() => stageRow(row)}
-                  className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-bold text-slate-200 transition hover:border-[#FF6B00]/50 active:scale-95"
-                >
-                  Sim <ArrowUpRight className="h-3 w-3" />
-                </button>
+                <div className="flex items-center gap-3">
+                  {isNeutral || row.is_win === null ? (
+                    <span className="font-mono-num text-xs font-bold text-slate-400">
+                      {row.move_pct >= 0 ? '+' : ''}
+                      {row.move_pct.toFixed(2)}% (Neutral)
+                    </span>
+                  ) : (
+                    <span
+                      className={`font-mono-num text-sm font-extrabold ${
+                        row.is_win ? 'text-emerald-400' : 'text-rose-400'
+                      }`}
+                    >
+                      {row.directional_pct >= 0 ? '+' : ''}
+                      {row.directional_pct.toFixed(2)}%
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => stageRow(row)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-bold text-slate-200 transition hover:border-[#FF6B00]/50 active:scale-95"
+                  >
+                    Sim <ArrowUpRight className="h-3 w-3" />
+                  </button>
+                </div>
               </div>
-            </div>
-          ))
+            )
+          })
         )}
       </div>
     </div>

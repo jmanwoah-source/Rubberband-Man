@@ -456,13 +456,25 @@ def render_mobile_scanner_page(
     cat_dte = int(cat_data.get("recommended_dte", rec_dte) or rec_dte)
     days_list = (cat_data.get("days") or [])[:5]
 
+    def _catalyst_tone_hex(tone: Any) -> str:
+        t = str(tone or "").strip().lower()
+        if t in ("rose", "high", "binary"):
+            return "#F43F5E"
+        if t in ("amber", "elevated"):
+            return "#FF6B00"
+        if t == "cyan":
+            return "#38BDF8"
+        if t in ("emerald", "clear"):
+            return "#34D399"
+        return "#FBBF24"
+
     rings_html = "".join(
         _render_ring_svg(
             pct=int(d.get("intensity_pct", 50) or 50),
             label=f"{d.get('day_short', '')} {d.get('day_num', '')}".strip(),
             sub=str(d.get("headline_tag", "FLOW"))[:10],
             is_active=bool(d.get("is_today", False)),
-            tone_hex="#FF6B00" if d.get("risk_tone") in ("HIGH", "BINARY") else ("#34D399" if d.get("risk_tone") == "CLEAR" else "#FBBF24"),
+            tone_hex=_catalyst_tone_hex(d.get("risk_tone")),
         )
         for d in days_list
     )
@@ -595,7 +607,6 @@ def render_mobile_scanner_page(
             st.session_state["schwab_prefill_needs_sync"] = True
             st.session_state["pending_workspace_view"] = "Charles Schwab Practice Desk & Diary"
             st.session_state["active_app_view"] = "Charles Schwab Practice Desk & Diary"
-            st.session_state["mobile_workspace_nav_select_top"] = "Charles Schwab Practice Desk & Diary"
             try:
                 st.query_params["page"] = "schwab"
             except Exception:

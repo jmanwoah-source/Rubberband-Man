@@ -194,7 +194,8 @@ st.markdown(styles.get_custom_css(), unsafe_allow_html=True)
 # =========================================================================
 # CORE HELPERS & WATCHLIST PERSISTENCE
 # =========================================================================
-WATCHLIST_FILE = os.path.join(_APP_DIR, "watchlist.json")
+_LEGACY_WATCHLIST_FILE = os.path.join(_APP_DIR, "watchlist.json")
+WATCHLIST_FILE = os.path.join(_APP_DIR, "data", "watchlist.json")
 QUICK_THEMATIC_ETFS = ["REMX", "SRVR", "ROBO", "JEDI", "SMH", "URA", "QTUM", "IGV"]
 
 
@@ -336,30 +337,72 @@ def save_env_keys(
     os.replace(tmp_env, env_path)
 
 
+def _quarantine_corrupt_watchlist(path: str) -> None:
+    """Move a corrupt watchlist JSON file aside instead of clobbering user data."""
+    try:
+        import datetime as _dt
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        quarantine_path = f"{path}.corrupt.{stamp}"
+        os.replace(path, quarantine_path)
+        print(f"Quarantined corrupt watchlist to {quarantine_path}")
+    except Exception as q_exc:
+        print(f"Failed to quarantine corrupt watchlist {path}: {q_exc}")
+
+
 def load_personal_watchlist() -> List[str]:
     default_list = ["REMX", "SRVR", "ROBO", "JEDI", "NVDA", "OKLO", "VRT", "ANET"]
+    os.makedirs(os.path.dirname(WATCHLIST_FILE), exist_ok=True)
+
+    # Auto-migrate legacy root watchlist.json into data/watchlist.json if not yet migrated
+    if not os.path.exists(WATCHLIST_FILE) and os.path.exists(_LEGACY_WATCHLIST_FILE):
+        try:
+            with open(_LEGACY_WATCHLIST_FILE, "r", encoding="utf-8") as f:
+                legacy_data = json.load(f)
+            if isinstance(legacy_data, list):
+                migrated = list(dict.fromkeys([str(t).strip().upper() for t in legacy_data if str(t).strip()]))
+                save_personal_watchlist(migrated)
+                return migrated
+            _quarantine_corrupt_watchlist(_LEGACY_WATCHLIST_FILE)
+        except Exception as exc:
+            print(f"Error migrating legacy watchlist from {_LEGACY_WATCHLIST_FILE}: {exc}")
+            _quarantine_corrupt_watchlist(_LEGACY_WATCHLIST_FILE)
+
     if os.path.exists(WATCHLIST_FILE):
         try:
             with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, list) and len(data) > 0:
-                    clean = [str(t).strip().upper() for t in data if str(t).strip()]
-                    return list(dict.fromkeys(clean))
+            if isinstance(data, list):
+                clean = [str(t).strip().upper() for t in data if str(t).strip()]
+                return list(dict.fromkeys(clean))
+            _quarantine_corrupt_watchlist(WATCHLIST_FILE)
         except Exception as exc:
             print(f"Error loading watchlist from {WATCHLIST_FILE}: {exc}")
+            _quarantine_corrupt_watchlist(WATCHLIST_FILE)
+
     save_personal_watchlist(default_list)
     return default_list
 
 
 def save_personal_watchlist(watchlist: List[str]) -> None:
+    temp_file: Optional[str] = None
     try:
+        os.makedirs(os.path.dirname(WATCHLIST_FILE), exist_ok=True)
         clean_list = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))
         temp_file = f"{WATCHLIST_FILE}.tmp.{os.getpid()}.{uuid.uuid4().hex[:6]}"
         with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(clean_list, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(temp_file, WATCHLIST_FILE)
+        temp_file = None
     except Exception as exc:
         print(f"Error saving watchlist to {WATCHLIST_FILE}: {exc}")
+    finally:
+        if temp_file and os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
 
 
 SECTOR_PALETTES = {

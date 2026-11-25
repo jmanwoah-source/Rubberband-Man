@@ -7,21 +7,33 @@ a clean JSON API and serves the built React PWA from `web/dist`.
 """
 from __future__ import annotations
 
+import csv
 import datetime
+import inspect
+import io
+import json
 import math
 import os
 import threading
 import time
+from collections import OrderedDict
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+
+from dotenv import load_dotenv
+
+ROOT_DIR = Path(__file__).resolve().parent
+WEB_DIST_DIR = ROOT_DIR / "web" / "dist"
+load_dotenv(ROOT_DIR / ".env")
 
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 import diary_db
 import edu_annotations
@@ -29,30 +41,71 @@ import marketdata_client
 import rubberband_engine_v3 as rbe3
 
 THEMATIC_ETFS: List[str] = ["REMX", "SRVR", "ROBO", "JEDI", "SMH", "URA", "QTUM", "IGV"]
-ROOT_DIR = Path(__file__).resolve().parent
-WEB_DIST_DIR = ROOT_DIR / "web" / "dist"
+
+_DEFAULT_CORS_ORIGINS: List[str] = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+]
+_env_cors = os.getenv("CORS_ORIGINS", "").strip()
+CORS_ORIGINS: List[str] = (
+    [origin.strip() for origin in _env_cors.split(",") if origin.strip()]
+    if _env_cors
+    else _DEFAULT_CORS_ORIGINS
+)
+
+
+def _is_empty_cache_value(val: Any) -> bool:
+    if val is None:
+        return True
+    if isinstance(val, (list, tuple, set, dict)) and len(val) == 0:
+        return True
+    if isinstance(val, pd.DataFrame) and val.empty:
+        return True
+    return False
 
 
 class _TTLCache:
-    """Thread-safe in-memory TTL cache for expensive market/engine calls."""
+    """Thread-safe bounded LRU TTL cache for expensive market/engine calls."""
 
-    def __init__(self) -> None:
+    def __init__(self, maxsize: int = 512) -> None:
         self._lock = threading.Lock()
-        self._store: Dict[str, tuple[float, Any]] = {}
+        self._maxsize = max(16, int(maxsize))
+        self._store: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+
+    def _sweep_expired_locked(self, now: float) -> None:
+        expired_keys = [k for k, (exp_ts, _) in self._store.items() if exp_ts <= now]
+        for k in expired_keys:
+            self._store.pop(k, None)
 
     def get_or_compute(self, key: str, ttl_seconds: float, fn) -> Any:
         now = time.monotonic()
         with self._lock:
             entry = self._store.get(key)
-            if entry and entry[0] > now:
-                return entry[1]
+            if entry is not None:
+                if entry[0] > now:
+                    self._store.move_to_end(key)
+                    return entry[1]
+                self._store.pop(key, None)
+
         val = fn()
+        if _is_empty_cache_value(val):
+            return val
+
+        now_after = time.monotonic()
         with self._lock:
-            self._store[key] = (time.monotonic() + ttl_seconds, val)
+            self._sweep_expired_locked(now_after)
+            self._store[key] = (now_after + ttl_seconds, val)
+            self._store.move_to_end(key)
+            while len(self._store) > self._maxsize:
+                self._store.popitem(last=False)
         return val
 
 
-_CACHE = _TTLCache()
+_CACHE = _TTLCache(maxsize=512)
 
 
 def _clean_json(obj: Any) -> Any:
@@ -145,7 +198,10 @@ def _build_chart_series(symbol: str, live_price: Optional[float] = None, bars: i
 
     work = df.copy()
     if not isinstance(work.index, pd.DatetimeIndex):
-        work.index = pd.to_datetime(work.index, errors="coerce")
+        if "date" in work.columns:
+            work.index = pd.to_datetime(work["date"], errors="coerce")
+        else:
+            work.index = pd.to_datetime(work.index, errors="coerce")
     work = work[work.index.notna()].sort_index()
     work = work.dropna(subset=["close"])
     if work.empty:
@@ -352,26 +408,221 @@ def _build_edu_bundle(
     return out
 
 
+def _normalize_trade_row(trade: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure every trade dict exposes both limit_price and entry_premium as numeric floats."""
+    row = dict(trade or {})
+    raw_px = row.get("limit_price")
+    if raw_px is None:
+        raw_px = row.get("entry_premium")
+    try:
+        px = float(raw_px if raw_px is not None else 0.0)
+        if not math.isfinite(px):
+            px = 0.0
+    except Exception:
+        px = 0.0
+    px = round(px, 4)
+    row["limit_price"] = px
+    row["entry_premium"] = px
+    if not row.get("time_in_force"):
+        row["time_in_force"] = "DAY"
+    return row
+
+
+def _estimate_open_trade_mark(trade: Dict[str, Any], live_spot: float) -> Dict[str, Any]:
+    """Compute live Black-Scholes mark-to-market for an open simulated option or vertical spread."""
+    row = _normalize_trade_row(trade)
+    entry_prem = float(row["limit_price"] or 0.01)
+    entry_spot = float(row.get("stock_price_at_entry") or live_spot or 100.0)
+    spot = float(live_spot) if (live_spot is not None and math.isfinite(float(live_spot)) and float(live_spot) > 0) else entry_spot
+    strike = float(row.get("strike") or spot)
+    opt_type = str(row.get("option_type") or "CALL").upper()
+    action = str(row.get("action") or "BUY_TO_OPEN").upper()
+    strategy = str(row.get("strategy") or "SINGLE_LEG").upper()
+    qty = max(1, int(row.get("quantity") or 1))
+    raw_k2 = row.get("short_strike")
+    short_k = float(raw_k2) if raw_k2 is not None and float(raw_k2) > 0.0 else None
+    is_spread = (
+        strategy == "VERTICAL_DEBIT_SPREAD"
+        and short_k is not None
+        and abs(short_k - strike) > 0.01
+    )
+    leg_mult = 2 if is_spread else 1
+    default_cost = (
+        max(0.0, qty * entry_prem * 100.0 - qty * 0.65 * leg_mult)
+        if "SELL" in action
+        else (qty * entry_prem * 100.0 + qty * 0.65 * leg_mult)
+    )
+    total_cost = float(row.get("total_cost") if row.get("total_cost") is not None else default_cost)
+
+    entry_time_str = str(row.get("entry_timestamp") or row.get("created_at") or "")[:10]
+    try:
+        entry_dt = datetime.date.fromisoformat(entry_time_str)
+        days_held = max(0, (datetime.date.today() - entry_dt).days)
+    except Exception:
+        days_held = 0
+
+    dte_entry = max(1, int(row.get("dte_at_entry") or 35))
+    dte_rem = max(1, dte_entry - days_held)
+    t_entry = dte_entry / 365.0
+    t_rem = dte_rem / 365.0
+    r = 0.0425
+
+    stored_iv = row.get("implied_vol_at_entry")
+    if stored_iv is not None and float(stored_iv) > 0.05:
+        raw_iv = float(stored_iv)
+        sigma = raw_iv / 100.0 if raw_iv > 3.0 else max(0.12, raw_iv)
+    else:
+        sigma = 0.42
+        try:
+            intr_e = max(0.0, entry_spot - strike) if opt_type == "CALL" else max(0.0, strike - entry_spot)
+            if is_spread and short_k is not None:
+                s_intr_e = max(0.0, entry_spot - short_k) if opt_type == "CALL" else max(0.0, short_k - entry_spot)
+                intr_e = max(0.0, intr_e - s_intr_e)
+            if entry_prem > intr_e:
+                sqrt_t = math.sqrt(t_entry)
+                for _ in range(6):
+                    if opt_type == "CALL":
+                        ml, _ = rbe3.bs_call_price_delta(entry_spot, strike, t_entry, r, sigma)
+                        ms, _ = (
+                            rbe3.bs_call_price_delta(entry_spot, short_k, t_entry, r, sigma)
+                            if (is_spread and short_k is not None)
+                            else (0.0, 0.0)
+                        )
+                    else:
+                        ml, _ = rbe3.bs_put_price_delta(entry_spot, strike, t_entry, r, sigma)
+                        ms, _ = (
+                            rbe3.bs_put_price_delta(entry_spot, short_k, t_entry, r, sigma)
+                            if (is_spread and short_k is not None)
+                            else (0.0, 0.0)
+                        )
+                    diff = entry_prem - (ml - ms)
+                    if abs(diff) < 0.005:
+                        break
+                    d1 = (math.log(max(1e-4, entry_spot / max(1e-4, strike))) + (r + 0.5 * sigma * sigma) * t_entry) / max(1e-4, sigma * sqrt_t)
+                    phi = math.exp(-0.5 * d1 * d1) / 2.5066282746310002
+                    vega = max(0.01, entry_spot * sqrt_t * phi)
+                    sigma = float(np.clip(sigma + diff / vega, 0.10, 2.50))
+        except Exception:
+            sigma = 0.42
+
+    if opt_type == "CALL":
+        bs_entry, _ = rbe3.bs_call_price_delta(entry_spot, strike, t_entry, r, sigma)
+        bs_now, _ = rbe3.bs_call_price_delta(spot, strike, t_rem, r, sigma)
+        intrinsic_now = max(0.0, spot - strike)
+    else:
+        bs_entry, _ = rbe3.bs_put_price_delta(entry_spot, strike, t_entry, r, sigma)
+        bs_now, _ = rbe3.bs_put_price_delta(spot, strike, t_rem, r, sigma)
+        intrinsic_now = max(0.0, strike - spot)
+
+    if is_spread and short_k is not None:
+        spread_width = abs(short_k - strike)
+        if opt_type == "CALL":
+            s_bs_entry, _ = rbe3.bs_call_price_delta(entry_spot, short_k, t_entry, r, sigma)
+            s_bs_now, _ = rbe3.bs_call_price_delta(spot, short_k, t_rem, r, sigma)
+            intrinsic_now = max(0.0, min(spread_width, intrinsic_now - max(0.0, spot - short_k)))
+        else:
+            s_bs_entry, _ = rbe3.bs_put_price_delta(entry_spot, short_k, t_entry, r, sigma)
+            s_bs_now, _ = rbe3.bs_put_price_delta(spot, short_k, t_rem, r, sigma)
+            intrinsic_now = max(0.0, min(spread_width, intrinsic_now - max(0.0, short_k - spot)))
+        bs_sp_entry = max(0.01, bs_entry - s_bs_entry)
+        bs_sp_now = max(0.01, min(spread_width, bs_now - s_bs_now))
+        raw_mark = entry_prem + (bs_sp_now - bs_sp_entry)
+        est_mark = max(0.01, min(spread_width, max(intrinsic_now, raw_mark)))
+    else:
+        raw_mark = entry_prem + (bs_now - bs_entry)
+        est_mark = max(0.01, intrinsic_now, raw_mark)
+
+    est_mark = round(float(est_mark), 2)
+    current_value = round(qty * est_mark * 100.0, 2)
+
+    if "SELL" in action:
+        # Short / credit position: profit when current buyback value falls below credit received
+        unrealized_dollar = round(total_cost - current_value, 2)
+        if is_spread and short_k is not None:
+            max_risk = max(1.0, abs(short_k - strike) * 100.0 * qty - total_cost)
+        else:
+            max_risk = max(1.0, total_cost)
+        unrealized_pct = round((unrealized_dollar / max_risk) * 100.0, 1)
+    else:
+        unrealized_dollar = round(current_value - total_cost, 2)
+        unrealized_pct = round((unrealized_dollar / max(1.0, total_cost)) * 100.0, 1)
+
+    row["live_stock_price"] = round(spot, 2)
+    row["est_current_premium"] = est_mark
+    row["unrealized_pnl_dollar"] = unrealized_dollar
+    row["unrealized_pnl_pct"] = unrealized_pct
+    row["live_unrealized_pnl_dollar"] = unrealized_dollar
+    return row
+
+
+def _enrich_open_trades_with_live_marks(open_trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not open_trades:
+        return []
+    symbols = sorted({str(t.get("symbol", "")).upper() for t in open_trades if t.get("symbol")})
+    try:
+        quotes = (
+            _CACHE.get_or_compute(
+                f"quotes:{','.join(symbols)}",
+                60.0,
+                lambda: rbe3.fmp_batch_quotes(symbols, ttl=60) if symbols else {},
+            )
+            if symbols
+            else {}
+        )
+    except Exception:
+        quotes = {}
+
+    enriched: List[Dict[str, Any]] = []
+    for t in open_trades:
+        sym = str(t.get("symbol", "")).upper()
+        q = quotes.get(sym, {}) if isinstance(quotes, dict) else {}
+        live_px = q.get("price") if isinstance(q, dict) else None
+        if live_px is None or not math.isfinite(float(live_px)) or float(live_px) <= 0:
+            live_px = float(t.get("stock_price_at_entry") or 100.0)
+        enriched.append(_estimate_open_trade_mark(t, float(live_px)))
+    return enriched
+
+
 class CreateTradeRequest(BaseModel):
     symbol: str = Field(..., min_length=1, max_length=12)
-    action: str = "BUY_TO_OPEN"
-    option_type: str = "CALL"
+    action: Literal["BUY_TO_OPEN", "SELL_TO_OPEN"] = "BUY_TO_OPEN"
+    option_type: Literal["CALL", "PUT"] = "CALL"
     strike: float = Field(..., gt=0)
-    expiration_date: str = Field(..., min_length=8, max_length=20)
+    expiration_date: str = Field(..., min_length=4, max_length=48)
     quantity: int = Field(1, ge=1, le=500)
     limit_price: float = Field(..., gt=0)
     stock_price_at_entry: float = Field(..., gt=0)
-    strategy: str = "SINGLE_LEG"
-    order_type: str = "LIMIT"
-    target_stock_price: Optional[float] = None
-    stop_stock_price: Optional[float] = None
-    conviction_score: float = 50.0
+    strategy: Literal["SINGLE_LEG", "VERTICAL_DEBIT_SPREAD"] = "SINGLE_LEG"
+    order_type: Literal["LIMIT", "MARKET", "STOP_ON_QUOTE"] = "LIMIT"
+    time_in_force: Literal["DAY", "GTC"] = "DAY"
+    target_stock_price: Optional[float] = Field(default=None, gt=0)
+    stop_stock_price: Optional[float] = Field(default=None, gt=0)
+    target_premium: Optional[float] = Field(default=None, gt=0)
+    stop_premium: Optional[float] = Field(default=None, gt=0)
+    implied_vol_at_entry: Optional[float] = Field(default=None, gt=0)
+    conviction_score: float = Field(default=50.0, ge=-200.0, le=200.0)
     expected_basis_pct: float = 0.0
     whale_badge: str = "TWO-WAY FLOW"
     catalyst_tag: str = ""
     notes: str = ""
-    dte: Optional[int] = 35
-    short_strike: Optional[float] = None
+    dte: Optional[int] = Field(default=None, ge=1, le=730)
+    short_strike: Optional[float] = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_vertical_spread(self) -> "CreateTradeRequest":
+        if self.strategy == "VERTICAL_DEBIT_SPREAD":
+            if self.short_strike is None or self.short_strike <= 0:
+                raise ValueError("short_strike is required when strategy is VERTICAL_DEBIT_SPREAD")
+            if abs(float(self.short_strike) - float(self.strike)) < 0.01:
+                raise ValueError("short_strike must differ from strike for VERTICAL_DEBIT_SPREAD")
+        return self
+
+
+class UpdateTradeRequest(BaseModel):
+    target_stock_price: Optional[float] = Field(default=None, gt=0)
+    stop_stock_price: Optional[float] = Field(default=None, gt=0)
+    notes: Optional[str] = None
+    time_in_force: Optional[Literal["DAY", "GTC"]] = None
 
 
 class CloseTradeRequest(BaseModel):
@@ -380,36 +631,69 @@ class CloseTradeRequest(BaseModel):
     exit_notes: str = ""
 
 
-app = FastAPI(title="Rubberband Man API", version="4.0.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    diary_db.init_diary_db()
+    yield
+    backup_fn = getattr(diary_db, "backup_diary_db", None)
+    if callable(backup_fn):
+        try:
+            backup_fn(tag="shutdown")
+        except Exception:
+            pass
+    ckpt_fn = getattr(diary_db, "checkpoint_wal", None)
+    if callable(ckpt_fn):
+        try:
+            ckpt_fn()
+        except Exception:
+            pass
+
+
+app = FastAPI(title="Rubberband Man API", version="4.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ],
-    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials="*" not in CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.on_event("startup")
-def _on_startup() -> None:
-    diary_db.init_diary_db()
-
-
 @app.get("/api/health")
 def api_health() -> Dict[str, Any]:
     sectors = list(getattr(rbe3, "SECTORS", {}).keys())
-    return {
+    health_fn = getattr(diary_db, "get_diary_health", None)
+    if callable(health_fn):
+        try:
+            db_health = health_fn()
+        except Exception as exc:
+            db_health = {"ok": False, "error": str(exc)}
+    else:
+        db_path = getattr(diary_db, "DB_PATH", str(ROOT_DIR / "data" / "simulated_diary.db"))
+        db_health = {"ok": os.path.exists(db_path), "db_path": db_path}
+
+    hb_path = ROOT_DIR / "data" / ".daemon_heartbeat"
+    daemon_hb_age: Optional[float] = None
+    if hb_path.is_file():
+        try:
+            daemon_hb_age = round(max(0.0, time.time() - hb_path.stat().st_mtime), 1)
+        except Exception:
+            daemon_hb_age = None
+
+    return _clean_json({
         "ok": True,
         "sectors": sectors,
         "thematic_etfs": THEMATIC_ETFS,
-        "pwa_built": WEB_DIST_DIR.exists(),
-    }
+        "pwa_built": (WEB_DIST_DIR / "index.html").is_file(),
+        "db_health": db_health,
+        "api_keys": {
+            "fmp": bool(os.getenv("FMP_API_KEY", "").strip()),
+            "marketdata": bool(os.getenv("MARKETDATA_API_KEY", "").strip()),
+            "gemini": bool(os.getenv("GEMINI_API_KEY", "").strip()),
+        },
+        "daemon_heartbeat_age_sec": daemon_hb_age,
+    })
 
 
 @app.get("/api/bootstrap")
@@ -419,7 +703,7 @@ def api_bootstrap(
 ) -> Dict[str, Any]:
     norm_sec = _normalize_sector(sector)
     sectors_list = list(getattr(rbe3, "SECTORS", {}).keys())
-    req_tk = str(ticker or "").strip().upper()
+    req_tk = "".join(ch for ch in str(ticker or "").strip().upper() if ch.isalnum() or ch in (".", "-", "^"))[:12]
 
     ranked = _CACHE.get_or_compute(
         f"sector_scan:{norm_sec}",
@@ -519,9 +803,10 @@ def api_ticker_detail(
 @app.get("/api/diary")
 def api_get_diary() -> Dict[str, Any]:
     diary_db.init_diary_db()
-    summary = diary_db.get_diary_portfolio_summary()
-    open_trades = diary_db.get_open_trades()
-    closed_trades = diary_db.get_closed_trades(limit=50)
+    raw_open = diary_db.get_open_trades()
+    open_trades = _enrich_open_trades_with_live_marks(raw_open)
+    summary = diary_db.get_diary_portfolio_summary(open_trades)
+    closed_trades = [_normalize_trade_row(t) for t in diary_db.get_closed_trades(limit=200)]
     edu_ticket = edu_annotations.get_edu_topic("schwab_ticket", {"symbol": open_trades[0]["symbol"] if open_trades else "NVDA"})
     return _clean_json({
         "summary": summary,
@@ -538,28 +823,92 @@ def api_create_trade(payload: CreateTradeRequest) -> Dict[str, Any]:
     if not sym:
         raise HTTPException(status_code=400, detail="Invalid symbol")
 
-    trade = diary_db.create_simulated_trade(
-        symbol=sym,
-        action=payload.action,
-        option_type=payload.option_type,
-        strike=payload.strike,
-        expiration_date=payload.expiration_date,
-        quantity=payload.quantity,
-        limit_price=payload.limit_price,
-        stock_price_at_entry=payload.stock_price_at_entry,
-        strategy=payload.strategy,
-        order_type=payload.order_type,
+    create_kwargs: Dict[str, Any] = {
+        "symbol": sym,
+        "action": payload.action,
+        "option_type": payload.option_type,
+        "strike": payload.strike,
+        "expiration_date": payload.expiration_date,
+        "quantity": payload.quantity,
+        "limit_price": payload.limit_price,
+        "stock_price_at_entry": payload.stock_price_at_entry,
+        "strategy": payload.strategy,
+        "order_type": payload.order_type,
+        "target_stock_price": payload.target_stock_price,
+        "stop_stock_price": payload.stop_stock_price,
+        "target_premium": payload.target_premium,
+        "stop_premium": payload.stop_premium,
+        "conviction_score": payload.conviction_score,
+        "expected_basis_pct": payload.expected_basis_pct,
+        "whale_badge": payload.whale_badge,
+        "catalyst_tag": payload.catalyst_tag,
+        "notes": payload.notes,
+        "dte": payload.dte,
+        "short_strike": payload.short_strike if payload.strategy == "VERTICAL_DEBIT_SPREAD" else None,
+        "implied_vol_at_entry": payload.implied_vol_at_entry,
+    }
+    sig_params = inspect.signature(diary_db.create_simulated_trade).parameters
+    if "time_in_force" in sig_params:
+        create_kwargs["time_in_force"] = payload.time_in_force
+
+    trade = _normalize_trade_row(diary_db.create_simulated_trade(**create_kwargs))
+    if "time_in_force" not in trade or not trade["time_in_force"]:
+        trade["time_in_force"] = payload.time_in_force
+    open_marks = _enrich_open_trades_with_live_marks(diary_db.get_open_trades())
+    return _clean_json({
+        "ok": True,
+        "trade": trade,
+        "summary": diary_db.get_diary_portfolio_summary(open_marks),
+    })
+
+
+@app.patch("/api/diary/trades/{trade_id}")
+def api_update_trade(trade_id: int, payload: UpdateTradeRequest) -> Dict[str, Any]:
+    diary_db.init_diary_db()
+    update_fn = getattr(diary_db, "update_simulated_trade", None)
+    if not callable(update_fn):
+        raise HTTPException(status_code=501, detail="Trade update helper is not available in diary_db")
+
+    updated = update_fn(
+        trade_id=trade_id,
         target_stock_price=payload.target_stock_price,
         stop_stock_price=payload.stop_stock_price,
-        conviction_score=payload.conviction_score,
-        expected_basis_pct=payload.expected_basis_pct,
-        whale_badge=payload.whale_badge,
-        catalyst_tag=payload.catalyst_tag,
         notes=payload.notes,
-        dte=payload.dte,
-        short_strike=payload.short_strike,
+        time_in_force=payload.time_in_force,
     )
-    return _clean_json({"ok": True, "trade": trade, "summary": diary_db.get_diary_portfolio_summary()})
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Trade #{trade_id} not found or not editable")
+
+    open_marks = _enrich_open_trades_with_live_marks(diary_db.get_open_trades())
+    result: Dict[str, Any] = {
+        "ok": True,
+        "summary": diary_db.get_diary_portfolio_summary(open_marks),
+    }
+    if isinstance(updated, dict):
+        result["trade"] = _normalize_trade_row(updated)
+    return _clean_json(result)
+
+
+@app.delete("/api/diary/trades/{trade_id}")
+def api_void_trade(trade_id: int) -> Dict[str, Any]:
+    diary_db.init_diary_db()
+    del_fn = getattr(diary_db, "delete_simulated_trade", None)
+    if not callable(del_fn):
+        raise HTTPException(status_code=501, detail="Trade void helper is not available in diary_db")
+
+    sig_params = inspect.signature(del_fn).parameters
+    if "hard" in sig_params:
+        ok = del_fn(trade_id, hard=False)
+    else:
+        ok = del_fn(trade_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Trade #{trade_id} not found or already voided")
+
+    open_marks = _enrich_open_trades_with_live_marks(diary_db.get_open_trades())
+    return _clean_json({
+        "ok": True,
+        "summary": diary_db.get_diary_portfolio_summary(open_marks),
+    })
 
 
 @app.post("/api/diary/trades/{trade_id}/close")
@@ -573,7 +922,116 @@ def api_close_trade(trade_id: int, payload: CloseTradeRequest) -> Dict[str, Any]
     )
     if not ok:
         raise HTTPException(status_code=404, detail=f"Open trade #{trade_id} not found or already closed")
-    return _clean_json({"ok": True, "summary": diary_db.get_diary_portfolio_summary()})
+    open_marks = _enrich_open_trades_with_live_marks(diary_db.get_open_trades())
+    return _clean_json({"ok": True, "summary": diary_db.get_diary_portfolio_summary(open_marks)})
+
+
+@app.get("/api/diary/export")
+def api_export_diary(format: Literal["json", "csv"] = Query("json")) -> Response:
+    diary_db.init_diary_db()
+    export_fn = getattr(diary_db, "export_diary_data", None)
+    if callable(export_fn):
+        payload = export_fn()
+    else:
+        payload = {
+            "exported_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "simulated_trades": diary_db.get_open_trades() + diary_db.get_closed_trades(limit=10000),
+            "daily_recommendations": diary_db.get_historical_snapshots(),
+        }
+
+    stamp = datetime.date.today().strftime("%Y%m%d")
+    cleaned = _clean_json(payload)
+
+    if format == "json":
+        body = json.dumps(cleaned, indent=2)
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="rubberband_diary_{stamp}.json"',
+            },
+        )
+
+    trades = cleaned.get("simulated_trades") or cleaned.get("trades") or []
+    preferred_cols = [
+        "id",
+        "schwab_order_id",
+        "status",
+        "symbol",
+        "action",
+        "option_type",
+        "strategy",
+        "order_type",
+        "time_in_force",
+        "strike",
+        "short_strike",
+        "expiration_date",
+        "dte_at_entry",
+        "quantity",
+        "limit_price",
+        "stock_price_at_entry",
+        "total_cost",
+        "commission_fee",
+        "exit_commission_fee",
+        "target_stock_price",
+        "stop_stock_price",
+        "target_premium",
+        "stop_premium",
+        "implied_vol_at_entry",
+        "conviction_score",
+        "expected_basis_pct",
+        "whale_badge",
+        "catalyst_tag",
+        "entry_timestamp",
+        "exit_timestamp",
+        "exit_premium",
+        "exit_stock_price",
+        "realized_pnl_dollar",
+        "realized_pnl_pct",
+        "notes",
+        "created_at",
+    ]
+    extra_cols = sorted(
+        {k for row in trades if isinstance(row, dict) for k in row.keys()} - set(preferred_cols)
+    )
+    fieldnames = preferred_cols + extra_cols
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in trades:
+        if isinstance(row, dict):
+            writer.writerow(_normalize_trade_row(row))
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="rubberband_diary_{stamp}.csv"',
+        },
+    )
+
+
+@app.post("/api/diary/backup")
+def api_backup_diary() -> Dict[str, Any]:
+    diary_db.init_diary_db()
+    backup_fn = getattr(diary_db, "backup_diary_db", None)
+    if not callable(backup_fn):
+        raise HTTPException(status_code=501, detail="Backup helper is not available in diary_db")
+    backup_path = backup_fn(tag="manual")
+    ckpt_fn = getattr(diary_db, "checkpoint_wal", None)
+    if callable(ckpt_fn):
+        try:
+            ckpt_fn()
+        except Exception:
+            pass
+    health_fn = getattr(diary_db, "get_diary_health", None)
+    health = health_fn() if callable(health_fn) else None
+    return _clean_json({
+        "ok": bool(backup_path),
+        "backup_path": backup_path,
+        "db_health": health,
+    })
 
 
 @app.get("/api/ledger")
@@ -585,7 +1043,14 @@ def api_get_ledger(
     dates = diary_db.get_all_snapshot_dates()
     sel_date = date if (date and date in dates) else (dates[0] if dates else "")
     if not sel_date:
-        return _clean_json({"dates": [], "selected_date": "", "snapshots": [], "stats": {"count": 0, "win_rate_pct": 0.0, "avg_dir_pct": 0.0}, "edu_topic": edu_annotations.get_edu_topic("journal_audit", {})})
+        return _clean_json({
+            "dates": [],
+            "selected_date": "",
+            "sectors": ["All Sectors"] + list(getattr(rbe3, "SECTORS", {}).keys()),
+            "snapshots": [],
+            "stats": {"count": 0, "wins": 0, "directional_count": 0, "win_rate_pct": 0.0, "avg_dir_pct": 0.0},
+            "edu_topic": edu_annotations.get_edu_topic("journal_audit", {}),
+        })
 
     all_rows = diary_db.get_historical_snapshots(snapshot_date=sel_date, sector_name=None)
     if sector and sector != "All Sectors":
@@ -602,6 +1067,7 @@ def api_get_ledger(
     )
 
     wins = 0
+    dir_cnt = 0
     sum_dir = 0.0
     enriched: List[Dict[str, Any]] = []
     for r in rows:
@@ -609,25 +1075,42 @@ def api_get_ledger(
         snap_p = float(r.get("price_at_snapshot") or 0.0)
         q = quotes.get(sym, {}) if isinstance(quotes, dict) else {}
         cur_p = float(q.get("price") or snap_p)
-        act = str(r.get("action") or "CALL").upper()
+        act = str(r.get("action") or "MONITOR").upper()
         pct = ((cur_p - snap_p) / max(0.01, snap_p)) * 100.0 if snap_p > 0 else 0.0
-        dir_ret = -pct if "PUT" in act else pct
-        is_win = dir_ret > 0.0
-        if is_win:
-            wins += 1
-        sum_dir += dir_ret
+
+        if "PUT" in act:
+            dir_ret = -pct
+            is_directional = True
+        elif "CALL" in act:
+            dir_ret = pct
+            is_directional = True
+        else:
+            # Neutral MONITOR / WAIT actions do not assume CALL or PUT direction
+            dir_ret = 0.0
+            is_directional = False
+
+        if is_directional:
+            is_win: Optional[bool] = dir_ret > 0.0
+            dir_cnt += 1
+            if is_win:
+                wins += 1
+            sum_dir += dir_ret
+        else:
+            is_win = None
+
         enriched.append({
             **r,
             "normalized_sector": _normalize_sector(r.get("sector", "")),
             "current_price": round(cur_p, 2),
             "move_pct": round(pct, 2),
             "directional_pct": round(dir_ret, 2),
+            "is_directional": is_directional,
             "is_win": is_win,
         })
 
     cnt = len(enriched)
-    win_rt = round((wins / cnt) * 100.0, 1) if cnt else 0.0
-    avg_d = round(sum_dir / cnt, 2) if cnt else 0.0
+    win_rt = round((wins / dir_cnt) * 100.0, 1) if dir_cnt else 0.0
+    avg_d = round(sum_dir / dir_cnt, 2) if dir_cnt else 0.0
     edu_ledger = edu_annotations.get_edu_topic(
         "journal_audit",
         {"snapshot_date": sel_date, "win_rate_pct": win_rt, "avg_dir_pct": avg_d, "avg_opt_roi_pct": round(avg_d * 4.5, 1), "count": cnt},
@@ -637,7 +1120,7 @@ def api_get_ledger(
         "selected_date": sel_date,
         "sectors": ["All Sectors"] + list(getattr(rbe3, "SECTORS", {}).keys()),
         "snapshots": enriched,
-        "stats": {"count": cnt, "wins": wins, "win_rate_pct": win_rt, "avg_dir_pct": avg_d},
+        "stats": {"count": cnt, "wins": wins, "directional_count": dir_cnt, "win_rate_pct": win_rt, "avg_dir_pct": avg_d},
         "edu_topic": edu_ledger,
     })
 
@@ -650,10 +1133,17 @@ if (WEB_DIST_DIR / "assets").exists():
 def serve_spa(full_path: str):
     if full_path.startswith("api/") or full_path == "api":
         raise HTTPException(status_code=404, detail="API endpoint not found")
-    candidate = WEB_DIST_DIR / full_path
-    if full_path and candidate.exists() and candidate.is_file():
-        return FileResponse(str(candidate))
-    index_file = WEB_DIST_DIR / "index.html"
-    if index_file.exists():
+    if ".." in full_path or "\\" in full_path or "\x00" in full_path:
+        raise HTTPException(status_code=400, detail="Invalid request path")
+
+    dist_root = WEB_DIST_DIR.resolve()
+    rel_path = full_path.lstrip("/")
+    if rel_path:
+        candidate = (dist_root / rel_path).resolve()
+        if candidate.is_relative_to(dist_root) and candidate.is_file():
+            return FileResponse(str(candidate))
+
+    index_file = (dist_root / "index.html").resolve()
+    if index_file.is_relative_to(dist_root) and index_file.is_file():
         return FileResponse(str(index_file))
-    return {"message": "Rubberband Man API is running. Build web/dist to serve the React PWA."}
+    raise HTTPException(status_code=404, detail="Frontend bundle not built. Run npm --prefix web run build.")

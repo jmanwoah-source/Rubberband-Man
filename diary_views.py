@@ -1196,7 +1196,8 @@ def estimate_live_option_mark(
         net_theta_per_sh = g_long["theta"]
         net_vega_per_sh = g_long["vega"]
 
-    sign_pos = -1.0 if "SELL" in str(trade.get("action", "BUY")).upper() else 1.0
+    is_sell_pos = "SELL" in str(trade.get("action", "BUY")).upper()
+    sign_pos = -1.0 if is_sell_pos else 1.0
     net_delta_shares = round(sign_pos * net_delta_per_sh * 100.0 * qty, 1)
     net_delta_dollars = round(net_delta_shares * current_spot, 2)
     daily_theta_dollars = round(sign_pos * net_theta_per_sh * 100.0 * qty, 2)
@@ -1204,8 +1205,17 @@ def estimate_live_option_mark(
 
     est_mark = round(est_mark, 2)
     current_value = round(qty * est_mark * 100.0, 2)
-    unrealized_dollar = round(current_value - total_cost, 2)
-    unrealized_pct = round((unrealized_dollar / max(1.0, total_cost)) * 100.0, 1)
+    if is_sell_pos:
+        # Short option / credit: unrealized gain when buyback cost drops below credit received
+        unrealized_dollar = round(total_cost - current_value, 2)
+        if is_spread and short_k is not None:
+            risk_denom = max(1.0, abs(short_k - strike) * 100.0 * qty - total_cost)
+        else:
+            risk_denom = max(1.0, total_cost)
+        unrealized_pct = round((unrealized_dollar / risk_denom) * 100.0, 1)
+    else:
+        unrealized_dollar = round(current_value - total_cost, 2)
+        unrealized_pct = round((unrealized_dollar / max(1.0, total_cost)) * 100.0, 1)
 
     return {
         "current_spot": round(current_spot, 2),
@@ -1458,28 +1468,33 @@ def render_schwab_order_dialog(active_leg: Dict[str, Any], cand_intel: Optional[
     col_btn_trans, col_btn_cancel = st.columns([2.0, 1.0])
     with col_btn_trans:
         if st.button("⚡ Transmit Simulated Order to Schwab Ledger", type="primary", width="stretch", key="btn_dlg_transmit"):
-            trade_res = diary_db.create_simulated_trade(
-                symbol=leg_sym,
-                action=opt_action,
-                option_type=leg_type,
-                strike=leg_strike,
-                expiration_date=leg_exp,
-                quantity=opt_qty,
-                limit_price=opt_limit,
-                stock_price_at_entry=spot_price,
-                strategy=sel_strategy,
-                order_type=opt_ord_type,
-                target_stock_price=tgt_val,
-                stop_stock_price=stp_val,
-                conviction_score=score_200,
-                expected_basis_pct=float(m.get("expected_basis_pct", prefill.get("expected_basis_pct", 0.0)) or 0.0),
-                whale_badge=str(m.get("whale_badge", prefill.get("whale_badge", "⚪ TWO-WAY FLOW"))),
-                catalyst_tag=str(prefill.get("catalyst_tag", "")),
-                notes=diary_notes_in,
-                dte=leg_dte,
-                short_strike=short_k_val if is_spread_dlg else None,
-                implied_vol_at_entry=sigma_dlg,
-            )
+            _dlg_tif_raw = str(active_leg.get("time_in_force") or prefill.get("time_in_force") or "DAY").upper()
+            _dlg_tif = "GTC" if "GTC" in _dlg_tif_raw else "DAY"
+            _dlg_kwargs: Dict[str, Any] = {
+                "symbol": leg_sym,
+                "action": opt_action,
+                "option_type": leg_type,
+                "strike": leg_strike,
+                "expiration_date": leg_exp,
+                "quantity": opt_qty,
+                "limit_price": opt_limit,
+                "stock_price_at_entry": spot_price,
+                "strategy": sel_strategy,
+                "order_type": opt_ord_type,
+                "target_stock_price": tgt_val,
+                "stop_stock_price": stp_val,
+                "conviction_score": score_200,
+                "expected_basis_pct": float(m.get("expected_basis_pct", prefill.get("expected_basis_pct", 0.0)) or 0.0),
+                "whale_badge": str(m.get("whale_badge", prefill.get("whale_badge", "⚪ TWO-WAY FLOW"))),
+                "catalyst_tag": str(active_leg.get("catalyst_tag") or prefill.get("catalyst_tag") or ""),
+                "notes": diary_notes_in,
+                "dte": leg_dte,
+                "short_strike": short_k_val if is_spread_dlg else None,
+                "implied_vol_at_entry": sigma_dlg,
+            }
+            if "time_in_force" in inspect.signature(diary_db.create_simulated_trade).parameters:
+                _dlg_kwargs["time_in_force"] = _dlg_tif
+            trade_res = diary_db.create_simulated_trade(**_dlg_kwargs)
             st.session_state["schwab_last_receipt"] = trade_res
             if "schwab_active_leg" in st.session_state:
                 del st.session_state["schwab_active_leg"]
@@ -1755,7 +1770,7 @@ def render_schwab_practice_diary_page():
 
     def _on_sim_etf_pick() -> None:
         picked_etf = st.session_state.get("sim_etf_pills")
-        cur_sym = st.session_state.get("schwab_sim_active_symbol") or active_sym
+        cur_sym = st.session_state.get("sim_active_symbol") or active_sym
         if picked_etf and picked_etf != cur_sym:
             set_active_sim_symbol(picked_etf)
             st.session_state["_sim_etf_synced_sym"] = picked_etf
@@ -2658,17 +2673,18 @@ def render_schwab_practice_diary_page():
                 </div>
                 """)
                 _spr_pct_rail = ((leg_ask - leg_bid) / max(0.01, leg_limit) * 100.0) if (leg_ask > leg_bid > 0 and leg_limit > 0) else 4.0
-                _edu.render_edu_drawer(
-                    "schwab_ticket",
-                    live_ctx={
-                        "symbol": leg_sym,
-                        "strategy": opt_strat_rail,
-                        "dte": leg_dte,
-                        "spread_pct": _spr_pct_rail,
-                        "be_pct": be_pct,
-                        "daily_theta": pos_theta_daily,
-                    },
-                )
+                if _edu is not None:
+                    _edu.render_edu_drawer(
+                        "schwab_ticket",
+                        live_ctx={
+                            "symbol": leg_sym,
+                            "strategy": opt_strat_rail,
+                            "dte": leg_dte,
+                            "spread_pct": _spr_pct_rail,
+                            "be_pct": be_pct,
+                            "daily_theta": pos_theta_daily,
+                        },
+                    )
 
                 in_notes_rail = st.text_area(
                     'Trading Diary Thesis Notes ("Why am I taking this trade?")',
@@ -2684,27 +2700,39 @@ def render_schwab_practice_diary_page():
                     submit_schwab_order = st.button("⚡ Transmit to Schwab", type="primary", width="stretch", key="btn_submit_unified_schwab")
 
                 if submit_schwab_order:
-                    trade_res = diary_db.create_simulated_trade(
-                        symbol=leg_sym,
-                        action=opt_action,
-                        option_type=opt_type_sel,
-                        strike=opt_strike_in,
-                        expiration_date=leg_exp,
-                        quantity=opt_qty_in,
-                        limit_price=opt_limit_in,
-                        stock_price_at_entry=spot_price,
-                        strategy=opt_strat_rail,
-                        order_type=opt_ord_type,
-                        target_stock_price=in_tgt_val,
-                        stop_stock_price=in_stp_val,
-                        conviction_score=int(in_conv_rail),
-                        expected_basis_pct=float(m.get("expected_basis_pct", 0.0) or 0.0),
-                        whale_badge=str(m.get("whale_badge", "⚪ TWO-WAY FLOW")),
-                        notes=in_notes_rail,
-                        dte=leg_dte,
-                        short_strike=opt_short_k_rail if is_spread_rail else None,
-                        implied_vol_at_entry=sigma_ticket,
+                    _tif_raw_rail = str(st.session_state.get("ticket_tif_rail", "GTC") or "GTC").upper()
+                    _rail_tif = "GTC" if "GTC" in _tif_raw_rail else "DAY"
+                    _rail_cat_tag = str(
+                        active_leg.get("catalyst_tag")
+                        or prefill.get("catalyst_tag")
+                        or m.get("earnings_date")
+                        or ""
                     )
+                    _rail_kwargs: Dict[str, Any] = {
+                        "symbol": leg_sym,
+                        "action": opt_action,
+                        "option_type": opt_type_sel,
+                        "strike": opt_strike_in,
+                        "expiration_date": leg_exp,
+                        "quantity": opt_qty_in,
+                        "limit_price": opt_limit_in,
+                        "stock_price_at_entry": spot_price,
+                        "strategy": opt_strat_rail,
+                        "order_type": opt_ord_type,
+                        "target_stock_price": in_tgt_val,
+                        "stop_stock_price": in_stp_val,
+                        "conviction_score": int(in_conv_rail),
+                        "expected_basis_pct": float(m.get("expected_basis_pct", 0.0) or 0.0),
+                        "whale_badge": str(m.get("whale_badge", "⚪ TWO-WAY FLOW")),
+                        "catalyst_tag": _rail_cat_tag,
+                        "notes": in_notes_rail,
+                        "dte": leg_dte,
+                        "short_strike": opt_short_k_rail if is_spread_rail else None,
+                        "implied_vol_at_entry": sigma_ticket,
+                    }
+                    if "time_in_force" in inspect.signature(diary_db.create_simulated_trade).parameters:
+                        _rail_kwargs["time_in_force"] = _rail_tif
+                    trade_res = diary_db.create_simulated_trade(**_rail_kwargs)
                     st.session_state["schwab_last_receipt"] = trade_res
                     if "schwab_active_leg" in st.session_state:
                         del st.session_state["schwab_active_leg"]

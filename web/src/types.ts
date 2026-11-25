@@ -139,18 +139,38 @@ export interface DiaryTrade {
   action: string
   option_type: string
   strategy?: string
+  order_type?: string
+  time_in_force?: string
   strike: number
   short_strike?: number | null
   expiration_date: string
+  dte_at_entry?: number
   quantity: number
-  entry_premium: number
+  limit_price: number
+  entry_premium?: number
   stock_price_at_entry: number
+  total_cost?: number
+  commission_fee?: number
+  exit_commission_fee?: number
   target_stock_price?: number | null
   stop_stock_price?: number | null
+  target_premium?: number | null
+  stop_premium?: number | null
+  implied_vol_at_entry?: number | null
+  conviction_score?: number
+  expected_basis_pct?: number
+  whale_badge?: string
+  catalyst_tag?: string
+  entry_timestamp?: string
+  exit_timestamp?: string | null
   exit_premium?: number | null
   exit_stock_price?: number | null
   realized_pnl_dollar?: number | null
   realized_pnl_pct?: number | null
+  live_stock_price?: number
+  est_current_premium?: number
+  unrealized_pnl_dollar?: number
+  unrealized_pnl_pct?: number
   status: string
   created_at?: string
   notes?: string
@@ -173,7 +193,8 @@ export interface LedgerSnapshotRow {
   current_price: number
   move_pct: number
   directional_pct: number
-  is_win: boolean
+  is_directional?: boolean
+  is_win: boolean | null
   recommended_strike?: number
   expected_basis_pct?: number
   composite_score?: number
@@ -190,6 +211,7 @@ export interface LedgerResponse {
   stats: {
     count: number
     wins?: number
+    directional_count?: number
     win_rate_pct: number
     avg_dir_pct: number
   }
@@ -198,6 +220,7 @@ export interface LedgerResponse {
 
 export interface TradePrefill {
   symbol: string
+  action?: 'BUY_TO_OPEN' | 'SELL_TO_OPEN'
   option_type: 'CALL' | 'PUT'
   strategy: 'SINGLE_LEG' | 'VERTICAL_DEBIT_SPREAD'
   strike: number
@@ -209,5 +232,9 @@ export interface TradePrefill {
   target_stock_price?: number | null
   stop_stock_price?: number | null
   conviction_score: number
+  expected_basis_pct?: number
+  whale_badge?: string
+  catalyst_tag?: string
+  implied_vol_at_entry?: number | null
   notes: string
 }

@@ -1,5 +1,6 @@
 import os
 import re
+from pathlib import Path
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -8,7 +9,7 @@ from dotenv import load_dotenv
 import rubberband_engine_v3 as rbe3
 import marketdata_client
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 FMP_STABLE_URL = "https://financialmodelingprep.com/stable"
 FMP_V3_URL = "https://financialmodelingprep.com/api/v3"

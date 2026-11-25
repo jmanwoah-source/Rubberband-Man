@@ -20,6 +20,7 @@ import json
 import sqlite3
 import datetime
 import threading
+from pathlib import Path
 from collections import OrderedDict
 from contextlib import closing
 from datetime import timedelta
@@ -32,13 +33,14 @@ import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 MARKETDATA_BASE_URL = os.getenv("MARKETDATA_BASE_URL", "https://api.marketdata.app/v1").strip().rstrip("/")
 
 _DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(_DB_DIR, exist_ok=True)
 _MD_CACHE_DB = os.path.join(_DB_DIR, "marketdata_cache.db")
+_MD_CACHE_RETENTION_SEC = 48 * 3600  # 48h retention cap to keep cache DB lean
 
 _MEM_CACHE: "OrderedDict[str, Tuple[Any, float]]" = OrderedDict()
 _MEM_CACHE_MAX = 1500
@@ -66,12 +68,20 @@ def _ny_tz() -> datetime.tzinfo:
         return datetime.timezone(datetime.timedelta(hours=-5))
 
 
+def _connect_md_cache(timeout: float = 15.0) -> sqlite3.Connection:
+    conn = sqlite3.connect(_MD_CACHE_DB, timeout=timeout)
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=15000;")
+    return conn
+
+
 def _init_cache_db() -> None:
     try:
-        cutoff = time.time() - (7 * 86400)
-        with closing(sqlite3.connect(_MD_CACHE_DB, timeout=10)) as conn:
+        cutoff = time.time() - _MD_CACHE_RETENTION_SEC
+        with closing(_connect_md_cache(timeout=15.0)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA auto_vacuum=INCREMENTAL;")
             with conn:
-                conn.execute("PRAGMA journal_mode=WAL;")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS api_cache (
@@ -81,7 +91,11 @@ def _init_cache_db() -> None:
                     )
                     """
                 )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_api_cache_updated ON api_cache(updated_at);"
+                )
                 conn.execute("DELETE FROM api_cache WHERE updated_at < ?", (cutoff,))
+            conn.execute("PRAGMA incremental_vacuum(200);")
     except Exception:
         pass
 
@@ -115,7 +129,7 @@ def _get_cached(key: str, ttl: int = 300, allow_stale: bool = False) -> Optional
                 return val
 
     try:
-        with closing(sqlite3.connect(_MD_CACHE_DB, timeout=5)) as conn:
+        with closing(_connect_md_cache(timeout=15.0)) as conn:
             row = conn.execute(
                 "SELECT payload, updated_at FROM api_cache WHERE cache_key = ?", (key,)
             ).fetchone()
@@ -144,18 +158,24 @@ def _set_cached(key: str, val: Any) -> None:
         while len(_MEM_CACHE) > _MEM_CACHE_MAX:
             _MEM_CACHE.popitem(last=False)
         if now - _LAST_SQLITE_PRUNE_TS >= 3600.0:
-            _LAST_SQLITE_PRUNE_TS = now
             do_prune = True
     try:
         payload_str = json.dumps(val)
-        with closing(sqlite3.connect(_MD_CACHE_DB, timeout=5)) as conn:
+        with closing(_connect_md_cache(timeout=15.0)) as conn:
             with conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO api_cache (cache_key, payload, updated_at) VALUES (?, ?, ?)",
                     (key, payload_str, now),
                 )
                 if do_prune:
-                    conn.execute("DELETE FROM api_cache WHERE updated_at < ?", (now - 7 * 86400,))
+                    conn.execute(
+                        "DELETE FROM api_cache WHERE updated_at < ?",
+                        (now - _MD_CACHE_RETENTION_SEC,),
+                    )
+            if do_prune:
+                conn.execute("PRAGMA incremental_vacuum(200);")
+                with _CACHE_LOCK:
+                    _LAST_SQLITE_PRUNE_TS = now
     except Exception:
         pass
 
