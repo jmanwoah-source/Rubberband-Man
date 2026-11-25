@@ -10,6 +10,7 @@ import {
 } from '../utils/dates'
 import { ElasticityChart } from './ElasticityChart'
 import { LearnChip } from './LearnChip'
+import { ScrollRail } from './ScrollRail'
 import { TradeAnatomyCorridor } from './TradeAnatomyCorridor'
 
 interface ScannerViewProps {
@@ -176,7 +177,11 @@ export function ScannerView({
         </div>
 
         {catDays.length > 0 && (
-          <div className="mt-3 flex snap-x snap-mandatory gap-2 overflow-x-auto pb-0.5 no-scrollbar sm:grid sm:grid-cols-5 sm:overflow-visible sm:pb-0">
+          <ScrollRail
+            className="mt-3"
+            ariaLabel="5-day catalysts"
+            contentClassName="snap-x snap-mandatory gap-2 pb-0.5 md:grid md:grid-cols-5 md:overflow-visible md:pb-0"
+          >
             {catDays.map((d, idx) => {
               const pct = Math.max(12, Math.min(100, n(d.intensity_pct, 45)))
               const r = 13
@@ -186,7 +191,7 @@ export function ScannerView({
               return (
                 <div
                   key={`${d.day_short ?? idx}-${idx}`}
-                  className={`flex min-w-[138px] shrink-0 snap-start items-center gap-2.5 rounded-xl border px-2.5 py-2 sm:min-w-0 sm:shrink ${
+                  className={`flex min-w-[144px] shrink-0 snap-start items-center gap-2.5 rounded-xl border px-2.5 py-2 md:min-w-0 md:shrink ${
                     d.is_today
                       ? 'border-[#FF6B00]/40 bg-[#FF6B00]/[0.07]'
                       : 'border-white/[0.05] bg-white/[0.02]'
@@ -227,7 +232,7 @@ export function ScannerView({
                 </div>
               )
             })}
-          </div>
+          </ScrollRail>
         )}
       </div>
 
@@ -250,7 +255,11 @@ export function ScannerView({
             </select>
           </div>
 
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+          <ScrollRail
+            ariaLabel="Thematic ETFs"
+            className="max-w-full flex-1 md:flex-initial"
+            contentClassName="gap-1.5"
+          >
             {data.thematic_etfs.map((etf) => {
               const active = etf === data.active_ticker
               return (
@@ -277,11 +286,11 @@ export function ScannerView({
                 </button>
               )
             })}
-          </div>
+          </ScrollRail>
         </div>
 
         {/* Sector Top-5 Quick Rail */}
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pt-0.5">
+        <ScrollRail ariaLabel="Sector Top-5" contentClassName="gap-1.5 pt-0.5">
           <span className="shrink-0 text-[10px] font-bold tracking-wider text-slate-500 uppercase">
             Top-5
           </span>
@@ -312,7 +321,7 @@ export function ScannerView({
               </button>
             )
           })}
-        </div>
+        </ScrollRail>
       </div>
 
       {/* Main Command Grid: Hero Conviction + Charts */}
