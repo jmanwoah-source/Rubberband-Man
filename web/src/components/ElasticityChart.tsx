@@ -3,6 +3,7 @@ import {
   CandlestickSeries,
   ColorType,
   CrosshairMode,
+  HistogramSeries,
   LineSeries,
   LineStyle,
   createChart,
@@ -19,6 +20,14 @@ interface ElasticityChartProps {
   height?: number
 }
 
+function formatVolumeCompact(vol: number): string {
+  if (!Number.isFinite(vol) || vol <= 0) return '0'
+  if (vol >= 1_000_000_000) return `${(vol / 1_000_000_000).toFixed(2)}B`
+  if (vol >= 1_000_000) return `${(vol / 1_000_000).toFixed(1)}M`
+  if (vol >= 1_000) return `${(vol / 1_000).toFixed(0)}K`
+  return String(Math.round(vol))
+}
+
 export function ElasticityChart({
   symbol,
   bars,
@@ -26,7 +35,7 @@ export function ElasticityChart({
   targetPrice,
   stopPrice,
   isPut = false,
-  height = 310,
+  height = 336,
 }: ElasticityChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const lastBar = bars[bars.length - 1]
@@ -36,6 +45,7 @@ export function ElasticityChart({
     time: string
     close: number
     vwma20: number
+    volume: number
   } | null>(null)
 
   useEffect(() => {
@@ -62,6 +72,7 @@ export function ElasticityChart({
       },
       rightPriceScale: {
         borderColor: 'rgba(255, 255, 255, 0.08)',
+        scaleMargins: { top: 0.06, bottom: 0.24 },
       },
       timeScale: {
         borderColor: 'rgba(255, 255, 255, 0.08)',
@@ -70,6 +81,39 @@ export function ElasticityChart({
       handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
       handleScale: { pinch: true, axisPressedMouseMove: true, mouseWheel: true },
     })
+
+    const hasVolume = bars.some((b) => Number.isFinite(b.volume) && b.volume > 0)
+    if (hasVolume) {
+      const avgVol =
+        bars.reduce((acc, b) => acc + Math.max(0, b.volume || 0), 0) / Math.max(1, bars.length)
+      const volumeSeries = chart.addSeries(HistogramSeries, {
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'volume',
+        priceLineVisible: false,
+        lastValueVisible: false,
+      })
+      chart.priceScale('volume').applyOptions({
+        scaleMargins: { top: 0.80, bottom: 0 },
+      })
+      volumeSeries.setData(
+        bars.map((b) => {
+          const v = Math.max(0, b.volume || 0)
+          const isUp = b.close >= b.open
+          const isSurge = avgVol > 0 && v >= avgVol * 1.5
+          return {
+            time: b.time,
+            value: v,
+            color: isUp
+              ? isSurge
+                ? 'rgba(16, 185, 129, 0.56)'
+                : 'rgba(16, 185, 129, 0.28)'
+              : isSurge
+                ? 'rgba(244, 63, 94, 0.56)'
+                : 'rgba(244, 63, 94, 0.28)',
+          }
+        }),
+      )
+    }
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#10B981',
@@ -159,6 +203,7 @@ export function ElasticityChart({
           time: match.time,
           close: match.close,
           vwma20: match.vwma20,
+          volume: match.volume ?? 0,
         })
       }
     })
@@ -182,7 +227,10 @@ export function ElasticityChart({
 
   const activeHover = hoverInfo && hoverInfo.scopeKey === scopeKey ? hoverInfo : null
   const hud =
-    activeHover ?? (lastBar ? { time: lastBar.time, close: lastBar.close, vwma20: lastBar.vwma20 } : null)
+    activeHover ??
+    (lastBar
+      ? { time: lastBar.time, close: lastBar.close, vwma20: lastBar.vwma20, volume: lastBar.volume ?? 0 }
+      : null)
 
   return (
     <div className="obsidian-card overflow-hidden rounded-2xl p-3">
@@ -192,14 +240,19 @@ export function ElasticityChart({
             {symbol} Price &amp; VWMA-20 Envelope
           </span>
           <span className="font-mono-num hidden rounded border border-white/[0.06] bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-slate-400 sm:inline">
-            ±2σ ATR Channel
+            ±2σ ATR · Vol
           </span>
         </div>
         {hud && (
-          <div className="font-mono-num flex items-center gap-3 text-[11px]">
+          <div className="font-mono-num flex flex-wrap items-center gap-2.5 text-[11px]">
             <span className="text-slate-400">{hud.time}</span>
             <span className="font-bold text-slate-100">${hud.close.toFixed(2)}</span>
             <span className="text-[#FF8533]">VWMA ${hud.vwma20.toFixed(2)}</span>
+            {hud.volume > 0 && (
+              <span className="text-slate-400">
+                Vol <strong className="text-slate-200">{formatVolumeCompact(hud.volume)}</strong>
+              </span>
+            )}
           </div>
         )}
       </div>
